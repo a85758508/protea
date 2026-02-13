@@ -1,0 +1,22 @@
+# Environment
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Data
+data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Testing
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# Ring 2 is a separate git repo managed by Ring 0
+ring2/.git/
