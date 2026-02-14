@@ -203,3 +203,48 @@ class TestEvolver:
         assert r.success is True
         assert r.reason == "OK"
         assert r.new_source == "code"
+
+    def test_directive_passed_to_prompt_builder(self, tmp_path):
+        """Directive should be forwarded to build_evolution_prompt."""
+        ring2 = tmp_path / "ring2"
+        ring2.mkdir()
+        (ring2 / "main.py").write_text(VALID_SOURCE)
+
+        llm_response = f"```python\n{VALID_SOURCE}```"
+        config = _make_config()
+        fitness = _make_fitness()
+
+        with patch("ring1.evolver.ClaudeClient") as MockClient, \
+             patch("ring1.evolver.build_evolution_prompt") as mock_prompt:
+            MockClient.return_value.send_message.return_value = llm_response
+            mock_prompt.return_value = ("system", "user")
+            evolver = Evolver(config, fitness)
+            evolver.evolve(ring2, generation=1, params={}, survived=True,
+                           directive="make a game")
+
+        mock_prompt.assert_called_once()
+        call_kwargs = mock_prompt.call_args
+        assert call_kwargs[1].get("directive") == "make a game" or \
+               (len(call_kwargs[0]) >= 8 and call_kwargs[0][7] == "make a game")
+
+    def test_directive_default_empty(self, tmp_path):
+        """Calling evolve without directive should use empty string."""
+        ring2 = tmp_path / "ring2"
+        ring2.mkdir()
+        (ring2 / "main.py").write_text(VALID_SOURCE)
+
+        llm_response = f"```python\n{VALID_SOURCE}```"
+        config = _make_config()
+        fitness = _make_fitness()
+
+        with patch("ring1.evolver.ClaudeClient") as MockClient, \
+             patch("ring1.evolver.build_evolution_prompt") as mock_prompt:
+            MockClient.return_value.send_message.return_value = llm_response
+            mock_prompt.return_value = ("system", "user")
+            evolver = Evolver(config, fitness)
+            evolver.evolve(ring2, generation=1, params={}, survived=True)
+
+        mock_prompt.assert_called_once()
+        call_kwargs = mock_prompt.call_args
+        assert call_kwargs[1].get("directive") == "" or \
+               (len(call_kwargs[0]) >= 8 and call_kwargs[0][7] == "")

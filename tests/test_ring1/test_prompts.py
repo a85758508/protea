@@ -110,6 +110,43 @@ class TestBuildEvolutionPrompt:
         assert "0.42" in user
         assert "120" in user
 
+    def test_directive_included(self):
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=0,
+            survived=True,
+            directive="变成贪吃蛇",
+        )
+        assert "User Directive" in user
+        assert "变成贪吃蛇" in user
+
+    def test_no_directive_no_section(self):
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=0,
+            survived=True,
+            directive="",
+        )
+        assert "User Directive" not in user
+
+    def test_directive_default_empty(self):
+        """Calling without directive arg should not include directive section."""
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=0,
+            survived=True,
+        )
+        assert "User Directive" not in user
+
 
 class TestExtractPythonCode:
     def test_extracts_code_block(self):

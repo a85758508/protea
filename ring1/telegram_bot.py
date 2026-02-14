@@ -9,10 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
+import queue
 import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 
 log = logging.getLogger("protea.telegram_bot")
 
@@ -42,6 +44,11 @@ class SentinelState:
         self.max_runtime_sec: float = 0.0
         self.last_score: float = 0.0
         self.last_survived: bool = False
+        # Task / scheduling fields (Phase 3.5)
+        self.task_queue: queue.Queue = queue.Queue()
+        self.p0_active = threading.Event()    # P0 task executing
+        self.p0_event = threading.Event()     # pulse to wake sentinel
+        self.evolution_directive: str = ""    # user directive (lock-protected)
 
     def snapshot(self) -> dict:
         """Return a consistent copy of all fields."""
@@ -55,7 +62,23 @@ class SentinelState:
                 "last_score": self.last_score,
                 "last_survived": self.last_survived,
                 "paused": self.pause_event.is_set(),
+                "p0_active": self.p0_active.is_set(),
+                "evolution_directive": self.evolution_directive,
+                "task_queue_size": self.task_queue.qsize(),
             }
+
+
+# ---------------------------------------------------------------------------
+# Task dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Task:
+    """A user task submitted via free-text Telegram message."""
+    text: str
+    chat_id: str
+    created_at: float = field(default_factory=time.time)
+    task_id: str = field(default_factory=lambda: f"t-{int(time.time() * 1000) % 1_000_000}")
 
 
 # ---------------------------------------------------------------------------
@@ -206,8 +229,40 @@ class TelegramBot:
             "/code — current Ring 2 source\n"
             "/pause — pause evolution loop\n"
             "/resume — resume evolution loop\n"
-            "/kill — restart Ring 2 (no generation advance)"
+            "/kill — restart Ring 2 (no generation advance)\n"
+            "/direct <text> — set evolution directive\n"
+            "/tasks — show task queue and directive\n\n"
+            "Or send any text to ask Protea a question (P0 task)."
         )
+
+    def _cmd_direct(self, full_text: str) -> str:
+        """Set an evolution directive from /direct <text>."""
+        # Strip the /direct prefix (and optional @botname)
+        parts = full_text.strip().split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            return "Usage: /direct <directive text>\nExample: /direct 变成贪吃蛇"
+        directive = parts[1].strip()
+        with self.state.lock:
+            self.state.evolution_directive = directive
+        self.state.p0_event.set()  # wake sentinel
+        return f"Evolution directive set: {directive}"
+
+    def _cmd_tasks(self) -> str:
+        """Show task queue status and current directive."""
+        snap = self.state.snapshot()
+        lines = ["*Task Queue Status:*"]
+        lines.append(f"Queued tasks: {snap['task_queue_size']}")
+        lines.append(f"P0 active: {'Yes' if snap['p0_active'] else 'No'}")
+        directive = snap["evolution_directive"]
+        lines.append(f"Directive: {directive if directive else '(none)'}")
+        return "\n".join(lines)
+
+    def _enqueue_task(self, text: str, chat_id: str) -> str:
+        """Create a Task, enqueue it, pulse p0_event, return ack."""
+        task = Task(text=text, chat_id=chat_id)
+        self.state.task_queue.put(task)
+        self.state.p0_event.set()  # wake sentinel for P0 scheduling
+        return f"Got it — processing your request ({task.task_id})..."
 
     # -- dispatch --
 
@@ -221,14 +276,26 @@ class TelegramBot:
         "/kill": "_cmd_kill",
         "/help": "_cmd_help",
         "/start": "_cmd_help",
+        "/tasks": "_cmd_tasks",
     }
 
-    def _handle_command(self, text: str) -> str:
-        """Dispatch a command string and return the response text."""
-        cmd = text.strip().split()[0].lower() if text.strip() else ""
-        # Strip @botname suffix (e.g. "/status@MyBot")
-        cmd = cmd.split("@")[0]
-        method_name = self._COMMANDS.get(cmd)
+    def _handle_command(self, text: str, chat_id: str = "") -> str:
+        """Dispatch a command or free-text message and return the response."""
+        stripped = text.strip()
+        if not stripped:
+            return self._cmd_help()
+
+        # Free text (not a command) → enqueue as P0 task
+        if not stripped.startswith("/"):
+            return self._enqueue_task(stripped, chat_id)
+
+        # /direct needs special handling (passes full text)
+        first_word = stripped.split()[0].lower().split("@")[0]
+        if first_word == "/direct":
+            return self._cmd_direct(stripped)
+
+        # Standard command dispatch
+        method_name = self._COMMANDS.get(first_word)
         if method_name is None:
             return self._cmd_help()
         return getattr(self, method_name)()
@@ -246,10 +313,12 @@ class TelegramBot:
                         if not self._is_authorized(update):
                             log.debug("Ignoring unauthorized update")
                             continue
-                        text = update.get("message", {}).get("text", "")
+                        msg = update.get("message", {})
+                        text = msg.get("text", "")
                         if not text:
                             continue
-                        reply = self._handle_command(text)
+                        msg_chat_id = str(msg.get("chat", {}).get("id", ""))
+                        reply = self._handle_command(text, chat_id=msg_chat_id)
                         self._send_reply(reply)
                     except Exception:
                         log.debug("Error handling update", exc_info=True)

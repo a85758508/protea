@@ -56,7 +56,7 @@ def _stop_ring2(proc: subprocess.Popen | None) -> None:
     log.info("Ring 2 stopped  pid=%d", proc.pid)
 
 
-def _try_evolve(project_root, fitness, ring2_path, generation, params, survived, notifier):
+def _try_evolve(project_root, fitness, ring2_path, generation, params, survived, notifier, directive=""):
     """Best-effort evolution.  Returns True if new code was written."""
     try:
         from ring1.config import load_ring1_config
@@ -73,6 +73,7 @@ def _try_evolve(project_root, fitness, ring2_path, generation, params, survived,
             generation=generation,
             params=params_to_dict(params),
             survived=survived,
+            directive=directive,
         )
         if result.success:
             log.info("Evolution succeeded: %s", result.reason)
@@ -119,6 +120,23 @@ def _create_bot(project_root, state, fitness, ring2_path):
         return None
 
 
+def _create_executor(project_root, state, ring2_path, reply_fn):
+    """Best-effort task executor creation.  Returns None on any error."""
+    try:
+        from ring1.config import load_ring1_config
+        from ring1.task_executor import create_executor, start_executor_thread
+
+        r1_config = load_ring1_config(project_root)
+        executor = create_executor(r1_config, state, ring2_path, reply_fn)
+        if executor:
+            start_executor_thread(executor)
+            log.info("Task executor started")
+        return executor
+    except Exception as exc:
+        log.debug("Task executor not available: %s", exc)
+        return None
+
+
 def run(project_root: pathlib.Path) -> None:
     """Sentinel main loop — run until interrupted."""
     cfg = _load_config(project_root)
@@ -144,6 +162,10 @@ def run(project_root: pathlib.Path) -> None:
     state = SentinelState()
     bot = _create_bot(project_root, state, fitness, ring2_path)
 
+    # Task executor for P0 user tasks.
+    reply_fn = bot._send_reply if bot else (lambda text: None)
+    executor = _create_executor(project_root, state, ring2_path, reply_fn)
+
     generation = 0
     last_good_hash: str | None = None
     proc: subprocess.Popen | None = None
@@ -163,7 +185,8 @@ def run(project_root: pathlib.Path) -> None:
         hb.wait_for_heartbeat(startup_timeout=timeout)
 
         while True:
-            time.sleep(interval)
+            state.p0_event.wait(timeout=interval)
+            state.p0_event.clear()
 
             # --- resource check ---
             ok, msg = check_resources(
@@ -226,11 +249,19 @@ def run(project_root: pathlib.Path) -> None:
                 except subprocess.CalledProcessError:
                     pass
 
-                # Evolve (best-effort).
-                evolved = _try_evolve(
-                    project_root, fitness, ring2_path,
-                    generation, params, True, notifier,
-                )
+                # Evolve (best-effort) — skip if P0 task active.
+                if state.p0_active.is_set():
+                    log.info("P0 task active — skipping evolution")
+                    evolved = False
+                else:
+                    with state.lock:
+                        directive = state.evolution_directive
+                        state.evolution_directive = ""
+                    evolved = _try_evolve(
+                        project_root, fitness, ring2_path,
+                        generation, params, True, notifier,
+                        directive=directive,
+                    )
                 if evolved:
                     try:
                         git.snapshot(f"gen-{generation} evolved")
@@ -279,11 +310,19 @@ def run(project_root: pathlib.Path) -> None:
                 log.info("Rolling back to %s", last_good_hash[:12])
                 git.rollback(last_good_hash)
 
-            # Evolve from the good base (best-effort).
-            evolved = _try_evolve(
-                project_root, fitness, ring2_path,
-                generation, params, False, notifier,
-            )
+            # Evolve from the good base (best-effort) — skip if P0 active.
+            if state.p0_active.is_set():
+                log.info("P0 task active — skipping evolution")
+                evolved = False
+            else:
+                with state.lock:
+                    directive = state.evolution_directive
+                    state.evolution_directive = ""
+                evolved = _try_evolve(
+                    project_root, fitness, ring2_path,
+                    generation, params, False, notifier,
+                    directive=directive,
+                )
             if evolved:
                 try:
                     git.snapshot(f"gen-{generation} evolved-from-rollback")
@@ -307,6 +346,8 @@ def run(project_root: pathlib.Path) -> None:
     except KeyboardInterrupt:
         log.info("Sentinel shutting down (KeyboardInterrupt)")
     finally:
+        if executor:
+            executor.stop()
         if bot:
             bot.stop()
         _stop_ring2(proc)

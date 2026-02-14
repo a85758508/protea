@@ -78,6 +78,7 @@ class Evolver:
         generation: int,
         params: dict,
         survived: bool,
+        directive: str = "",
     ) -> EvolutionResult:
         """Run one evolution cycle.
 
@@ -111,6 +112,7 @@ class Evolver:
             params=params,
             generation=generation,
             survived=survived,
+            directive=directive,
         )
 
         # 4. Call Claude API.

@@ -52,6 +52,7 @@ def build_evolution_prompt(
     params: dict,
     generation: int,
     survived: bool,
+    directive: str = "",
 ) -> tuple[str, str]:
     """Build (system_prompt, user_message) for the evolution LLM call."""
     parts: list[str] = []
@@ -107,6 +108,14 @@ def build_evolution_prompt(
             "The previous code DIED (heartbeat lost). Fix the issue and make it "
             "more robust. Ensure the heartbeat loop runs reliably. "
             "Then add interesting behavior on top."
+        )
+
+    if directive:
+        parts.append("")
+        parts.append("## User Directive")
+        parts.append(
+            f"The user has requested a specific direction for evolution: {directive}\n"
+            "Prioritize this directive while still following all constraints above."
         )
 
     return SYSTEM_PROMPT, "\n".join(parts)
