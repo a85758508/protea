@@ -14,6 +14,8 @@ def create_default_registry(
     shell_timeout: int = 30,
     reply_fn=None,
     subagent_manager=None,
+    skill_store=None,
+    skill_runner=None,
 ) -> ToolRegistry:
     """Build a ToolRegistry with all standard tools.
 
@@ -47,5 +49,9 @@ def create_default_registry(
     if subagent_manager is not None:
         from ring1.tools.spawn import make_spawn_tool
         registry.register(make_spawn_tool(subagent_manager))
+
+    if skill_store is not None and skill_runner is not None:
+        from ring1.tools.skill import make_run_skill_tool
+        registry.register(make_run_skill_tool(skill_store, skill_runner))
 
     return registry

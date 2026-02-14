@@ -53,6 +53,11 @@ Message tool:
 Background tool:
 - spawn: Start a long-running background task. Results are sent via Telegram when done.
 
+Skill tool:
+- run_skill: Start a stored Protea skill by name. Skills are standalone programs
+  crystallized from successful evolution. Returns status, output, and HTTP port
+  if available. Use web_fetch to interact with the skill's API after starting it.
+
 Use web tools when the user's request requires current information from the web.
 Use file/shell tools when the user asks to read, modify, or explore files and code.
 Use the message tool to keep the user informed during long operations.
@@ -419,6 +424,7 @@ def create_executor(
     reply_fn,
     memory_store=None,
     skill_store=None,
+    skill_runner=None,
 ) -> TaskExecutor | None:
     """Create a TaskExecutor from Ring1Config, or None if no API key."""
     if not config.claude_api_key:
@@ -443,6 +449,8 @@ def create_executor(
         workspace_path=workspace,
         shell_timeout=shell_timeout,
         reply_fn=reply_fn,
+        skill_store=skill_store,
+        skill_runner=skill_runner,
     )
     subagent_mgr = SubagentManager(client, base_registry, reply_fn)
 
@@ -452,6 +460,8 @@ def create_executor(
         shell_timeout=shell_timeout,
         reply_fn=reply_fn,
         subagent_manager=subagent_mgr,
+        skill_store=skill_store,
+        skill_runner=skill_runner,
     )
 
     executor = TaskExecutor(
