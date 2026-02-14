@@ -214,6 +214,103 @@ class TestBuildEvolutionPrompt:
         assert "## Reflection" in system
         assert "reflection" in system.lower()
 
+    def test_task_history_included(self):
+        task_history = [
+            {"content": "What is the weather?"},
+            {"content": "Summarize this article"},
+        ]
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=0,
+            survived=True,
+            task_history=task_history,
+        )
+        assert "Recent User Tasks" in user
+        assert "What is the weather?" in user
+        assert "Summarize this article" in user
+
+    def test_no_task_history_no_section(self):
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=0,
+            survived=True,
+            task_history=None,
+        )
+        assert "Recent User Tasks" not in user
+
+    def test_empty_task_history_no_section(self):
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=0,
+            survived=True,
+            task_history=[],
+        )
+        assert "Recent User Tasks" not in user
+
+    def test_skills_included(self):
+        skills = [
+            {"name": "summarize", "description": "Summarize text"},
+            {"name": "translate", "description": "Translate text"},
+        ]
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=0,
+            survived=True,
+            skills=skills,
+        )
+        assert "Existing Skills" in user
+        assert "summarize: Summarize text" in user
+        assert "translate: Translate text" in user
+        assert "complementary" in user.lower() or "duplicat" in user.lower()
+
+    def test_no_skills_no_section(self):
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=0,
+            survived=True,
+            skills=None,
+        )
+        assert "Existing Skills" not in user
+
+    def test_empty_skills_no_section(self):
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=0,
+            survived=True,
+            skills=[],
+        )
+        assert "Existing Skills" not in user
+
+    def test_system_prompt_has_evolution_strategy(self):
+        system, _ = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=0,
+            survived=True,
+        )
+        assert "Evolution Strategy" in system
+        assert "user" in system.lower()
+
 
 class TestExtractPythonCode:
     def test_extracts_code_block(self):

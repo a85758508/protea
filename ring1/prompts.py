@@ -21,9 +21,11 @@ Your task is to mutate the Ring 2 code to create a new generation.
 3. The code MUST be a single valid Python file (pure stdlib only, no pip packages)
 4. The code MUST handle KeyboardInterrupt gracefully and clean up the heartbeat file
 
-## Freedom
-Beyond the heartbeat constraint, you have COMPLETE FREEDOM to make the code do
-anything interesting. Be creative! The code can:
+## Evolution Strategy
+Beyond the heartbeat constraint, evolve the code to be USEFUL to the user.
+Prioritize capabilities that align with the user's recent tasks and needs.
+If no task history is available, explore interesting computational abilities.
+The code can:
 - Compute things (math, fractals, cellular automata, simulations)
 - Generate data (sequences, patterns, art in text)
 - Explore algorithms (sorting, searching, optimization)
@@ -32,9 +34,13 @@ anything interesting. Be creative! The code can:
 - Do file I/O (within the ring2 directory)
 - Anything else that's interesting and runs with pure stdlib
 
+Refer to user task history (if provided) to guide evolution direction.
+Avoid duplicating existing skills — develop complementary capabilities.
+
 ## Fitness
 Your code is scored on:
 - Survival: Did it run for the full max_runtime without crashing? (primary)
+- User relevance: Does it develop capabilities useful to the user?
 - Behavioral diversity: Does it do something DIFFERENT from previous generations?
 
 ## Response Format
@@ -59,6 +65,8 @@ def build_evolution_prompt(
     survived: bool,
     directive: str = "",
     memories: list[dict] | None = None,
+    task_history: list[dict] | None = None,
+    skills: list[dict] | None = None,
 ) -> tuple[str, str]:
     """Build (system_prompt, user_message) for the evolution LLM call."""
     parts: list[str] = []
@@ -108,6 +116,25 @@ def build_evolution_prompt(
             mtype = mem.get("entry_type", "?")
             content = mem.get("content", "")
             parts.append(f"- [Gen {gen}, {mtype}] {content}")
+        parts.append("")
+
+    # Recent user tasks — guide evolution direction
+    if task_history:
+        parts.append("## Recent User Tasks")
+        for task in task_history[:10]:
+            content = task.get("content", "")
+            parts.append(f"- {content}")
+        parts.append("Consider evolving capabilities useful for these tasks.")
+        parts.append("")
+
+    # Existing skills — avoid duplication
+    if skills:
+        parts.append("## Existing Skills (avoid duplication)")
+        for skill in skills[:20]:
+            name = skill.get("name", "?")
+            desc = skill.get("description", "")
+            parts.append(f"- {name}: {desc}")
+        parts.append("Develop complementary capabilities instead of duplicating these.")
         parts.append("")
 
     # Instructions based on outcome

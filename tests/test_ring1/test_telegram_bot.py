@@ -168,6 +168,35 @@ class TestSentinelState:
         assert snap["evolution_directive"] == ""
         assert snap["task_queue_size"] == 0
 
+    def test_p1_active_field(self):
+        state = SentinelState()
+        assert not state.p1_active.is_set()
+        state.p1_active.set()
+        assert state.p1_active.is_set()
+        state.p1_active.clear()
+        assert not state.p1_active.is_set()
+
+    def test_last_evolution_time_field(self):
+        state = SentinelState()
+        assert state.last_evolution_time == 0.0
+        state.last_evolution_time = 1234.0
+        assert state.last_evolution_time == 1234.0
+
+    def test_skill_store_field(self):
+        state = SentinelState()
+        assert state.skill_store is None
+        state.skill_store = "mock"
+        assert state.skill_store == "mock"
+
+    def test_snapshot_includes_p1_active(self):
+        state = SentinelState()
+        snap = state.snapshot()
+        assert "p1_active" in snap
+        assert snap["p1_active"] is False
+        state.p1_active.set()
+        snap = state.snapshot()
+        assert snap["p1_active"] is True
+
 
 class TestTelegramBotCommands:
     """Test each command handler produces correct output."""
@@ -683,8 +712,99 @@ class TestForgetCommand:
             server.shutdown()
 
 
+class TestSkillsCommand:
+    """Test /skills command lists saved skills."""
+
+    def test_skills_no_store(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/skills")
+            assert "not available" in reply.lower()
+        finally:
+            server.shutdown()
+
+    def test_skills_empty(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            from ring0.skill_store import SkillStore
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            bot.state.skill_store = SkillStore(tmp_path / "skills.db")
+            reply = bot._handle_command("/skills")
+            assert "No skills" in reply
+        finally:
+            server.shutdown()
+
+    def test_skills_lists_entries(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            from ring0.skill_store import SkillStore
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            ss = SkillStore(tmp_path / "skills.db")
+            ss.add("summarize", "Summarize text", "Please summarize")
+            ss.add("translate", "Translate text", "Please translate")
+            bot.state.skill_store = ss
+            reply = bot._handle_command("/skills")
+            assert "summarize" in reply
+            assert "Summarize text" in reply
+            assert "translate" in reply
+            assert "2 total" in reply
+        finally:
+            server.shutdown()
+
+
+class TestSkillCommand:
+    """Test /skill <name> command shows skill details."""
+
+    def test_skill_no_store(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/skill summarize")
+            assert "not available" in reply.lower()
+        finally:
+            server.shutdown()
+
+    def test_skill_no_args(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            from ring0.skill_store import SkillStore
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            bot.state.skill_store = SkillStore(tmp_path / "skills.db")
+            reply = bot._handle_command("/skill")
+            assert "usage" in reply.lower()
+        finally:
+            server.shutdown()
+
+    def test_skill_not_found(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            from ring0.skill_store import SkillStore
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            bot.state.skill_store = SkillStore(tmp_path / "skills.db")
+            reply = bot._handle_command("/skill nonexistent")
+            assert "not found" in reply.lower()
+        finally:
+            server.shutdown()
+
+    def test_skill_shows_details(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            from ring0.skill_store import SkillStore
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            ss = SkillStore(tmp_path / "skills.db")
+            ss.add("summarize", "Summarize text", "Please summarize: {{text}}")
+            bot.state.skill_store = ss
+            reply = bot._handle_command("/skill summarize")
+            assert "summarize" in reply
+            assert "Summarize text" in reply
+            assert "Please summarize: {{text}}" in reply
+        finally:
+            server.shutdown()
+
+
 class TestHelpIncludesMemoryCommands:
-    """Test that /help includes /memory and /forget."""
+    """Test that /help includes /memory, /forget, /skills, and /skill."""
 
     def test_help_lists_memory(self, tmp_path, monkeypatch):
         server, port = _make_server()
@@ -693,6 +813,16 @@ class TestHelpIncludesMemoryCommands:
             reply = bot._handle_command("/help")
             assert "/memory" in reply
             assert "/forget" in reply
+        finally:
+            server.shutdown()
+
+    def test_help_lists_skills(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/help")
+            assert "/skills" in reply
+            assert "/skill" in reply
         finally:
             server.shutdown()
 

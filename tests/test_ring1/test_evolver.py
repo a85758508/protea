@@ -334,3 +334,71 @@ class TestEvolver:
             result = evolver.evolve(ring2, generation=1, params={}, survived=True)
 
         assert result.success is True
+
+    def test_task_history_passed_to_prompt_builder(self, tmp_path):
+        """task_history should be forwarded to build_evolution_prompt."""
+        ring2 = tmp_path / "ring2"
+        ring2.mkdir()
+        (ring2 / "main.py").write_text(VALID_SOURCE)
+
+        llm_response = f"```python\n{VALID_SOURCE}```"
+        config = _make_config()
+        fitness = _make_fitness()
+        task_history = [{"content": "test task"}]
+
+        with patch("ring1.evolver.ClaudeClient") as MockClient, \
+             patch("ring1.evolver.build_evolution_prompt") as mock_prompt:
+            MockClient.return_value.send_message.return_value = llm_response
+            mock_prompt.return_value = ("system", "user")
+            evolver = Evolver(config, fitness)
+            evolver.evolve(ring2, generation=1, params={}, survived=True,
+                           task_history=task_history)
+
+        mock_prompt.assert_called_once()
+        call_kwargs = mock_prompt.call_args
+        assert call_kwargs[1].get("task_history") == task_history
+
+    def test_skills_passed_to_prompt_builder(self, tmp_path):
+        """skills should be forwarded to build_evolution_prompt."""
+        ring2 = tmp_path / "ring2"
+        ring2.mkdir()
+        (ring2 / "main.py").write_text(VALID_SOURCE)
+
+        llm_response = f"```python\n{VALID_SOURCE}```"
+        config = _make_config()
+        fitness = _make_fitness()
+        skills = [{"name": "greet", "description": "Greeting"}]
+
+        with patch("ring1.evolver.ClaudeClient") as MockClient, \
+             patch("ring1.evolver.build_evolution_prompt") as mock_prompt:
+            MockClient.return_value.send_message.return_value = llm_response
+            mock_prompt.return_value = ("system", "user")
+            evolver = Evolver(config, fitness)
+            evolver.evolve(ring2, generation=1, params={}, survived=True,
+                           skills=skills)
+
+        mock_prompt.assert_called_once()
+        call_kwargs = mock_prompt.call_args
+        assert call_kwargs[1].get("skills") == skills
+
+    def test_task_history_and_skills_default_none(self, tmp_path):
+        """Calling evolve without task_history/skills should pass None."""
+        ring2 = tmp_path / "ring2"
+        ring2.mkdir()
+        (ring2 / "main.py").write_text(VALID_SOURCE)
+
+        llm_response = f"```python\n{VALID_SOURCE}```"
+        config = _make_config()
+        fitness = _make_fitness()
+
+        with patch("ring1.evolver.ClaudeClient") as MockClient, \
+             patch("ring1.evolver.build_evolution_prompt") as mock_prompt:
+            MockClient.return_value.send_message.return_value = llm_response
+            mock_prompt.return_value = ("system", "user")
+            evolver = Evolver(config, fitness)
+            evolver.evolve(ring2, generation=1, params={}, survived=True)
+
+        mock_prompt.assert_called_once()
+        call_kwargs = mock_prompt.call_args
+        assert call_kwargs[1].get("task_history") is None
+        assert call_kwargs[1].get("skills") is None

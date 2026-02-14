@@ -82,6 +82,8 @@ class Evolver:
         survived: bool,
         directive: str = "",
         memories: list[dict] | None = None,
+        task_history: list[dict] | None = None,
+        skills: list[dict] | None = None,
     ) -> EvolutionResult:
         """Run one evolution cycle.
 
@@ -118,6 +120,8 @@ class Evolver:
             survived=survived,
             directive=directive,
             memories=memories,
+            task_history=task_history,
+            skills=skills,
         )
 
         # 4. Call Claude API.

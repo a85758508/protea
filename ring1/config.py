@@ -18,6 +18,9 @@ class Ring1Config(NamedTuple):
     telegram_chat_id: str
     telegram_enabled: bool
     max_prompt_history: int
+    p1_enabled: bool
+    p1_idle_threshold_sec: int
+    p1_check_interval_sec: int
 
 
 def _load_dotenv(project_root: pathlib.Path) -> None:
@@ -57,6 +60,7 @@ def load_ring1_config(project_root: pathlib.Path) -> Ring1Config:
 
     r1 = toml.get("ring1", {})
     tg = r1.get("telegram", {})
+    autonomy = r1.get("autonomy", {})
 
     return Ring1Config(
         claude_api_key=os.environ.get("CLAUDE_API_KEY", ""),
@@ -66,4 +70,7 @@ def load_ring1_config(project_root: pathlib.Path) -> Ring1Config:
         telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
         telegram_enabled=tg.get("enabled", False),
         max_prompt_history=r1.get("max_prompt_history", 10),
+        p1_enabled=autonomy.get("enabled", True),
+        p1_idle_threshold_sec=autonomy.get("idle_threshold_sec", 600),
+        p1_check_interval_sec=autonomy.get("check_interval_sec", 60),
     )
