@@ -1,7 +1,8 @@
 """Sentinel — Ring 0 main loop (pure stdlib).
 
-Launches and supervises Ring 2.  On failure, rolls back to the last
-known-good commit and restarts.
+Launches and supervises Ring 2.  On success (survived max_runtime_sec),
+triggers Ring 1 evolution to mutate the code.  On failure, rolls back
+to the last known-good commit, evolves from that base, and restarts.
 """
 
 from __future__ import annotations
@@ -11,13 +12,14 @@ import os
 import pathlib
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 
 from ring0.fitness import FitnessTracker
 from ring0.git_manager import GitManager
 from ring0.heartbeat import HeartbeatMonitor
-from ring0.parameter_seed import generate_params
+from ring0.parameter_seed import generate_params, params_to_dict
 from ring0.resource_monitor import check_resources
 
 log = logging.getLogger("protea.sentinel")
@@ -54,6 +56,69 @@ def _stop_ring2(proc: subprocess.Popen | None) -> None:
     log.info("Ring 2 stopped  pid=%d", proc.pid)
 
 
+def _try_evolve(project_root, fitness, ring2_path, generation, params, survived, notifier):
+    """Best-effort evolution.  Returns True if new code was written."""
+    try:
+        from ring1.config import load_ring1_config
+        from ring1.evolver import Evolver
+
+        r1_config = load_ring1_config(project_root)
+        if not r1_config.claude_api_key:
+            log.warning("CLAUDE_API_KEY not set — skipping evolution")
+            return False
+
+        evolver = Evolver(r1_config, fitness)
+        result = evolver.evolve(
+            ring2_path=ring2_path,
+            generation=generation,
+            params=params_to_dict(params),
+            survived=survived,
+        )
+        if result.success:
+            log.info("Evolution succeeded: %s", result.reason)
+            return True
+        else:
+            log.warning("Evolution failed: %s", result.reason)
+            if notifier:
+                notifier.notify_error(generation, result.reason)
+            return False
+    except Exception as exc:
+        log.error("Evolution error (non-fatal): %s", exc)
+        if notifier:
+            notifier.notify_error(generation, str(exc))
+        return False
+
+
+def _create_notifier(project_root):
+    """Best-effort Telegram notifier creation.  Returns None on any error."""
+    try:
+        from ring1.config import load_ring1_config
+        from ring1.telegram import create_notifier
+
+        r1_config = load_ring1_config(project_root)
+        return create_notifier(r1_config)
+    except Exception as exc:
+        log.debug("Telegram notifier not available: %s", exc)
+        return None
+
+
+def _create_bot(project_root, state, fitness, ring2_path):
+    """Best-effort Telegram bot creation.  Returns None on any error."""
+    try:
+        from ring1.config import load_ring1_config
+        from ring1.telegram_bot import create_bot, start_bot_thread
+
+        r1_config = load_ring1_config(project_root)
+        bot = create_bot(r1_config, state, fitness, ring2_path)
+        if bot:
+            start_bot_thread(bot)
+            log.info("Telegram bot started")
+        return bot
+    except Exception as exc:
+        log.debug("Telegram bot not available: %s", exc)
+        return None
+
+
 def run(project_root: pathlib.Path) -> None:
     """Sentinel main loop — run until interrupted."""
     cfg = _load_config(project_root)
@@ -72,6 +137,12 @@ def run(project_root: pathlib.Path) -> None:
     git.init_repo()
     fitness = FitnessTracker(db_path)
     hb = HeartbeatMonitor(heartbeat_path, timeout_sec=timeout)
+    notifier = _create_notifier(project_root)
+
+    # Shared state for Telegram bot interaction.
+    from ring1.telegram_bot import SentinelState
+    state = SentinelState()
+    bot = _create_bot(project_root, state, fitness, ring2_path)
 
     generation = 0
     last_good_hash: str | None = None
@@ -86,6 +157,7 @@ def run(project_root: pathlib.Path) -> None:
     log.info("Sentinel online — heartbeat every %ds, timeout %ds", interval, timeout)
 
     try:
+        params = generate_params(generation, seed)
         proc = _start_ring2(ring2_path, heartbeat_path)
         start_time = time.time()
         hb.wait_for_heartbeat(startup_timeout=timeout)
@@ -102,29 +174,131 @@ def run(project_root: pathlib.Path) -> None:
             if not ok:
                 log.warning("Resource alert: %s", msg)
 
+            elapsed = time.time() - start_time
+
+            # --- update shared state for bot ---
+            with state.lock:
+                state.generation = generation
+                state.start_time = start_time
+                state.alive = hb.is_alive()
+                state.mutation_rate = params.mutation_rate
+                state.max_runtime_sec = params.max_runtime_sec
+
+            # --- pause check (bot can set this) ---
+            if state.pause_event.is_set():
+                continue
+
+            # --- kill check (bot can set this) ---
+            if state.kill_event.is_set():
+                state.kill_event.clear()
+                log.info("Kill signal received — restarting Ring 2 (gen-%d)", generation)
+                _stop_ring2(proc)
+                proc = _start_ring2(ring2_path, heartbeat_path)
+                start_time = time.time()
+                hb.wait_for_heartbeat(startup_timeout=timeout)
+                continue
+
+            # --- success check: survived max_runtime_sec ---
+            if elapsed >= params.max_runtime_sec and hb.is_alive():
+                log.info(
+                    "Ring 2 survived gen-%d (%.1fs >= %ds)",
+                    generation, elapsed, params.max_runtime_sec,
+                )
+                _stop_ring2(proc)
+
+                # Record success.
+                commit_hash = last_good_hash or "unknown"
+                fitness.record(
+                    generation=generation,
+                    commit_hash=commit_hash,
+                    score=1.0,
+                    runtime_sec=elapsed,
+                    survived=True,
+                )
+
+                with state.lock:
+                    state.last_score = 1.0
+                    state.last_survived = True
+
+                # Snapshot the surviving code.
+                try:
+                    last_good_hash = git.snapshot(f"gen-{generation} survived")
+                except subprocess.CalledProcessError:
+                    pass
+
+                # Evolve (best-effort).
+                evolved = _try_evolve(
+                    project_root, fitness, ring2_path,
+                    generation, params, True, notifier,
+                )
+                if evolved:
+                    try:
+                        git.snapshot(f"gen-{generation} evolved")
+                    except subprocess.CalledProcessError:
+                        pass
+
+                # Notify.
+                if notifier:
+                    notifier.notify_generation_complete(
+                        generation, 1.0, True, last_good_hash or "unknown",
+                    )
+
+                # Next generation.
+                generation += 1
+                params = generate_params(generation, seed)
+                log.info("Starting generation %d (params: %s)", generation, params)
+                proc = _start_ring2(ring2_path, heartbeat_path)
+                start_time = time.time()
+                hb.wait_for_heartbeat(startup_timeout=timeout)
+                continue
+
             # --- heartbeat check ---
             if hb.is_alive():
                 continue
 
-            # Ring 2 is dead — record failure, rollback, restart.
-            elapsed = time.time() - start_time
-            log.warning("Ring 2 lost heartbeat after %.1fs", elapsed)
+            # Ring 2 is dead — failure path.
+            log.warning("Ring 2 lost heartbeat after %.1fs (gen-%d)", elapsed, generation)
             _stop_ring2(proc)
 
-            params = generate_params(generation, seed)
+            score = min(elapsed / params.max_runtime_sec, 0.99) if params.max_runtime_sec > 0 else 0.0
+            commit_hash = last_good_hash or "unknown"
             fitness.record(
                 generation=generation,
-                commit_hash=last_good_hash or "unknown",
-                score=0.0,
+                commit_hash=commit_hash,
+                score=score,
                 runtime_sec=elapsed,
                 survived=False,
             )
 
+            with state.lock:
+                state.last_score = score
+                state.last_survived = False
+
+            # Rollback to last known-good code.
             if last_good_hash:
                 log.info("Rolling back to %s", last_good_hash[:12])
                 git.rollback(last_good_hash)
 
+            # Evolve from the good base (best-effort).
+            evolved = _try_evolve(
+                project_root, fitness, ring2_path,
+                generation, params, False, notifier,
+            )
+            if evolved:
+                try:
+                    git.snapshot(f"gen-{generation} evolved-from-rollback")
+                except subprocess.CalledProcessError:
+                    pass
+
+            # Notify.
+            if notifier:
+                notifier.notify_generation_complete(
+                    generation, score, False, commit_hash,
+                )
+
+            # Next generation.
             generation += 1
+            params = generate_params(generation, seed)
             log.info("Restarting Ring 2 — generation %d (params: %s)", generation, params)
             proc = _start_ring2(ring2_path, heartbeat_path)
             start_time = time.time()
@@ -133,6 +307,8 @@ def run(project_root: pathlib.Path) -> None:
     except KeyboardInterrupt:
         log.info("Sentinel shutting down (KeyboardInterrupt)")
     finally:
+        if bot:
+            bot.stop()
         _stop_ring2(proc)
         log.info("Sentinel offline")
 

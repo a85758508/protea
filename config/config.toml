@@ -13,3 +13,11 @@ db_path = "data/protea.db"
 
 [ring0.evolution]
 seed = 42
+
+[ring1]
+claude_model = "claude-sonnet-4-5-20250929"
+claude_max_tokens = 4096
+max_prompt_history = 10
+
+[ring1.telegram]
+enabled = true

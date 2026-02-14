@@ -1,0 +1,483 @@
+"""Tests for ring1.telegram_bot."""
+
+from __future__ import annotations
+
+import http.server
+import json
+import pathlib
+import threading
+import time
+from unittest.mock import MagicMock
+
+from ring1.telegram_bot import (
+    SentinelState,
+    TelegramBot,
+    create_bot,
+    start_bot_thread,
+)
+
+
+# ---------------------------------------------------------------------------
+# Mock Telegram API server
+# ---------------------------------------------------------------------------
+
+class _BotHandler(http.server.BaseHTTPRequestHandler):
+    """Mock Telegram Bot API that handles getUpdates + sendMessage."""
+
+    updates_queue: list[dict] = []
+    sent_messages: list[dict] = []
+    status_code: int = 200
+
+    def do_POST(self):
+        content_len = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(content_len)) if content_len else {}
+
+        # Route by path
+        path = self.path
+        if path.endswith("/getUpdates"):
+            resp_body = {"ok": True, "result": list(_BotHandler.updates_queue)}
+            _BotHandler.updates_queue.clear()
+        elif path.endswith("/sendMessage"):
+            _BotHandler.sent_messages.append(body)
+            resp_body = {"ok": True, "result": {"message_id": 1}}
+        else:
+            resp_body = {"ok": False}
+
+        self.send_response(_BotHandler.status_code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(resp_body).encode())
+
+    def log_message(self, format, *args):
+        pass  # silence
+
+
+def _make_server():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _BotHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    _BotHandler.updates_queue = []
+    _BotHandler.sent_messages = []
+    _BotHandler.status_code = 200
+    return server, port
+
+
+def _make_update(text: str, chat_id: str = "12345", update_id: int = 1) -> dict:
+    return {
+        "update_id": update_id,
+        "message": {
+            "text": text,
+            "chat": {"id": int(chat_id)},
+        },
+    }
+
+
+def _make_bot(port: int, tmp_path: pathlib.Path, monkeypatch) -> TelegramBot:
+    """Create a bot pointing at the local mock server."""
+    import ring1.telegram_bot as mod
+    monkeypatch.setattr(
+        mod, "_API_BASE",
+        f"http://127.0.0.1:{port}/bot{{token}}/{{method}}",
+    )
+    state = SentinelState()
+    fitness = MagicMock()
+    fitness.get_history.return_value = [
+        {"generation": 3, "score": 0.95, "survived": True, "runtime_sec": 120.0, "commit_hash": "abc123"},
+        {"generation": 2, "score": 0.70, "survived": False, "runtime_sec": 45.0, "commit_hash": "def456"},
+    ]
+    fitness.get_best.return_value = [
+        {"generation": 3, "score": 0.95, "survived": True, "commit_hash": "abc12345"},
+    ]
+    ring2 = tmp_path / "ring2"
+    ring2.mkdir(exist_ok=True)
+    (ring2 / "main.py").write_text("print('hello world')\n")
+    return TelegramBot("test-token", "12345", state, fitness, ring2)
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class TestSentinelState:
+    def test_initial_values(self):
+        state = SentinelState()
+        assert state.generation == 0
+        assert state.alive is False
+        assert state.mutation_rate == 0.0
+        assert not state.pause_event.is_set()
+        assert not state.kill_event.is_set()
+
+    def test_snapshot_under_lock(self):
+        state = SentinelState()
+        with state.lock:
+            state.generation = 5
+            state.alive = True
+            state.mutation_rate = 0.3
+        snap = state.snapshot()
+        assert snap["generation"] == 5
+        assert snap["alive"] is True
+        assert snap["mutation_rate"] == 0.3
+        assert snap["paused"] is False
+
+    def test_pause_event(self):
+        state = SentinelState()
+        state.pause_event.set()
+        assert state.snapshot()["paused"] is True
+        state.pause_event.clear()
+        assert state.snapshot()["paused"] is False
+
+    def test_kill_event(self):
+        state = SentinelState()
+        assert not state.kill_event.is_set()
+        state.kill_event.set()
+        assert state.kill_event.is_set()
+
+
+class TestTelegramBotCommands:
+    """Test each command handler produces correct output."""
+
+    def test_status(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            with bot.state.lock:
+                bot.state.generation = 7
+                bot.state.alive = True
+                bot.state.mutation_rate = 0.25
+                bot.state.max_runtime_sec = 60
+            reply = bot._handle_command("/status")
+            assert "Generation: 7" in reply
+            assert "ALIVE" in reply
+            assert "0.25" in reply
+        finally:
+            server.shutdown()
+
+    def test_status_paused(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            bot.state.pause_event.set()
+            reply = bot._handle_command("/status")
+            assert "PAUSED" in reply
+        finally:
+            server.shutdown()
+
+    def test_history(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/history")
+            assert "Gen 3" in reply
+            assert "0.95" in reply
+            assert "Gen 2" in reply
+            assert "FAIL" in reply
+            bot.fitness.get_history.assert_called_once_with(limit=10)
+        finally:
+            server.shutdown()
+
+    def test_history_empty(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            bot.fitness.get_history.return_value = []
+            reply = bot._handle_command("/history")
+            assert "No history" in reply
+        finally:
+            server.shutdown()
+
+    def test_top(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/top")
+            assert "Gen 3" in reply
+            assert "0.95" in reply
+            bot.fitness.get_best.assert_called_once_with(n=5)
+        finally:
+            server.shutdown()
+
+    def test_top_empty(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            bot.fitness.get_best.return_value = []
+            reply = bot._handle_command("/top")
+            assert "No fitness" in reply
+        finally:
+            server.shutdown()
+
+    def test_code(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/code")
+            assert "hello world" in reply
+            assert "```python" in reply
+        finally:
+            server.shutdown()
+
+    def test_code_missing_file(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            (bot.ring2_path / "main.py").unlink()
+            reply = bot._handle_command("/code")
+            assert "not found" in reply
+        finally:
+            server.shutdown()
+
+    def test_code_truncation(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            (bot.ring2_path / "main.py").write_text("x" * 5000)
+            reply = bot._handle_command("/code")
+            assert "truncated" in reply
+        finally:
+            server.shutdown()
+
+    def test_pause(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/pause")
+            assert "paused" in reply.lower()
+            assert bot.state.pause_event.is_set()
+        finally:
+            server.shutdown()
+
+    def test_pause_already_paused(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            bot.state.pause_event.set()
+            reply = bot._handle_command("/pause")
+            assert "Already" in reply
+        finally:
+            server.shutdown()
+
+    def test_resume(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            bot.state.pause_event.set()
+            reply = bot._handle_command("/resume")
+            assert "resumed" in reply.lower()
+            assert not bot.state.pause_event.is_set()
+        finally:
+            server.shutdown()
+
+    def test_resume_not_paused(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/resume")
+            assert "Not paused" in reply
+        finally:
+            server.shutdown()
+
+    def test_kill(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/kill")
+            assert "Kill" in reply or "restart" in reply.lower()
+            assert bot.state.kill_event.is_set()
+        finally:
+            server.shutdown()
+
+    def test_unknown_command_shows_help(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/notacommand")
+            assert "/status" in reply
+            assert "/history" in reply
+        finally:
+            server.shutdown()
+
+    def test_command_with_bot_suffix(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/status@ProteaBot")
+            assert "Generation" in reply
+        finally:
+            server.shutdown()
+
+
+class TestGetUpdates:
+    """Test offset tracking and update processing."""
+
+    def test_offset_tracking(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            assert bot._offset == 0
+
+            _BotHandler.updates_queue = [
+                _make_update("/status", update_id=100),
+                _make_update("/history", update_id=101),
+            ]
+            updates = bot._get_updates()
+            assert len(updates) == 2
+            assert bot._offset == 102  # last update_id + 1
+        finally:
+            server.shutdown()
+
+    def test_empty_updates(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            updates = bot._get_updates()
+            assert updates == []
+            assert bot._offset == 0
+        finally:
+            server.shutdown()
+
+    def test_api_failure_returns_empty(self, tmp_path, monkeypatch):
+        import ring1.telegram_bot as mod
+        monkeypatch.setattr(
+            mod, "_API_BASE",
+            "http://127.0.0.1:1/bot{token}/{method}",  # unreachable
+        )
+        state = SentinelState()
+        fitness = MagicMock()
+        ring2 = tmp_path / "ring2"
+        ring2.mkdir()
+        bot = TelegramBot("tok", "123", state, fitness, ring2)
+        updates = bot._get_updates()
+        assert updates == []
+
+
+class TestAuthorization:
+    """Test that only the configured chat_id is served."""
+
+    def test_authorized_chat(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            update = _make_update("/status", chat_id="12345")
+            assert bot._is_authorized(update) is True
+        finally:
+            server.shutdown()
+
+    def test_unauthorized_chat(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            update = _make_update("/status", chat_id="99999")
+            assert bot._is_authorized(update) is False
+        finally:
+            server.shutdown()
+
+    def test_missing_chat_field(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            update = {"update_id": 1, "message": {}}
+            assert bot._is_authorized(update) is False
+        finally:
+            server.shutdown()
+
+
+class TestCreateBot:
+    """Test factory function guard conditions."""
+
+    def test_disabled_returns_none(self):
+        cfg = MagicMock()
+        cfg.telegram_enabled = False
+        state = SentinelState()
+        result = create_bot(cfg, state, MagicMock(), pathlib.Path("/tmp"))
+        assert result is None
+
+    def test_missing_token_returns_none(self):
+        cfg = MagicMock()
+        cfg.telegram_enabled = True
+        cfg.telegram_bot_token = ""
+        cfg.telegram_chat_id = "123"
+        state = SentinelState()
+        result = create_bot(cfg, state, MagicMock(), pathlib.Path("/tmp"))
+        assert result is None
+
+    def test_missing_chat_id_returns_none(self):
+        cfg = MagicMock()
+        cfg.telegram_enabled = True
+        cfg.telegram_bot_token = "tok"
+        cfg.telegram_chat_id = ""
+        state = SentinelState()
+        result = create_bot(cfg, state, MagicMock(), pathlib.Path("/tmp"))
+        assert result is None
+
+    def test_valid_config_returns_bot(self):
+        cfg = MagicMock()
+        cfg.telegram_enabled = True
+        cfg.telegram_bot_token = "tok"
+        cfg.telegram_chat_id = "123"
+        state = SentinelState()
+        fitness = MagicMock()
+        result = create_bot(cfg, state, fitness, pathlib.Path("/tmp"))
+        assert isinstance(result, TelegramBot)
+        assert result.chat_id == "123"
+
+
+class TestBotLifecycle:
+    """Test daemon thread start and stop."""
+
+    def test_run_and_stop(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            thread = start_bot_thread(bot)
+            assert thread.daemon is True
+            assert thread.is_alive()
+
+            # Stop should cause the thread to exit
+            bot.stop()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        finally:
+            server.shutdown()
+
+    def test_end_to_end_command(self, tmp_path, monkeypatch):
+        """Enqueue an update, run the bot briefly, check the reply was sent."""
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            _BotHandler.updates_queue = [_make_update("/status", chat_id="12345")]
+
+            thread = start_bot_thread(bot)
+            # Wait for the bot to process the update and send a reply
+            deadline = time.time() + 5
+            while time.time() < deadline and not _BotHandler.sent_messages:
+                time.sleep(0.1)
+
+            assert len(_BotHandler.sent_messages) >= 1
+            reply = _BotHandler.sent_messages[0]
+            assert reply["chat_id"] == "12345"
+            assert "Generation" in reply["text"]
+
+            bot.stop()
+            thread.join(timeout=5)
+        finally:
+            server.shutdown()
+
+    def test_unauthorized_update_ignored(self, tmp_path, monkeypatch):
+        """Updates from wrong chat_id should not generate a reply."""
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            _BotHandler.updates_queue = [_make_update("/status", chat_id="99999")]
+
+            thread = start_bot_thread(bot)
+            # Give the bot time to process
+            time.sleep(1)
+
+            # No reply should have been sent
+            assert len(_BotHandler.sent_messages) == 0
+
+            bot.stop()
+            thread.join(timeout=5)
+        finally:
+            server.shutdown()
