@@ -29,7 +29,12 @@ check_interval_sec = 60
 [ring1.tools]
 workspace_path = "."
 shell_timeout = 30
-max_tool_rounds = 10
+max_tool_rounds = 25
+
+[ring1.portal]
+enabled = true
+host = "127.0.0.1"
+port = 8888
 
 [ring1.telegram]
 enabled = true

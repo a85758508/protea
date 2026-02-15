@@ -247,6 +247,21 @@ def _create_bot(project_root, state, fitness, ring2_path):
         return None
 
 
+def _create_portal(project_root, cfg, skill_store, skill_runner):
+    """Best-effort Skill Portal creation.  Returns None on any error."""
+    try:
+        from ring1.skill_portal import create_portal, start_portal_thread
+
+        portal = create_portal(skill_store, skill_runner, project_root, cfg)
+        if portal:
+            start_portal_thread(portal)
+            log.info("Skill Portal started")
+        return portal
+    except Exception as exc:
+        log.debug("Skill Portal not available: %s", exc)
+        return None
+
+
 def _create_executor(project_root, state, ring2_path, reply_fn, memory_store=None, skill_store=None, skill_runner=None):
     """Best-effort task executor creation.  Returns None on any error."""
     try:
@@ -301,6 +316,9 @@ def run(project_root: pathlib.Path) -> None:
     executor = _create_executor(project_root, state, ring2_path, reply_fn, memory_store=memory_store, skill_store=skill_store, skill_runner=skill_runner)
     # Expose subagent_manager on state for /background command.
     state.subagent_manager = getattr(executor, "subagent_manager", None) if executor else None
+
+    # Skill Portal — unified web dashboard.
+    portal = _create_portal(project_root, cfg, skill_store, skill_runner)
 
     # Commit watcher — auto-restart on new commits.
     commit_watcher = CommitWatcher(project_root, state.restart_event)
@@ -556,6 +574,8 @@ def run(project_root: pathlib.Path) -> None:
         log.info("Sentinel shutting down (KeyboardInterrupt)")
     finally:
         commit_watcher.stop()
+        if portal:
+            portal.stop()
         if skill_runner and skill_runner.is_running():
             skill_runner.stop()
         if executor:
