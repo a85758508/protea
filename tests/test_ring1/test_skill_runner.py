@@ -201,3 +201,32 @@ class TestPortDetection:
             assert info["port"] == 3000
         finally:
             sr.stop()
+
+
+# ---------------------------------------------------------------------------
+# TestPatchSource
+# ---------------------------------------------------------------------------
+
+
+class TestPatchSource:
+    def test_replaces_httpserver_constructor(self):
+        src = "from http.server import HTTPServer\nserver = HTTPServer(('', 8080), Handler)\n"
+        patched = SkillRunner._patch_source(src)
+        assert "ThreadingHTTPServer(('', 8080), Handler)" in patched
+        assert "server = HTTPServer(" not in patched
+
+    def test_adds_threading_import(self):
+        src = "from http.server import HTTPServer\n"
+        patched = SkillRunner._patch_source(src)
+        assert "from http.server import HTTPServer, ThreadingHTTPServer" in patched
+
+    def test_skips_if_already_has_threading(self):
+        src = "from http.server import HTTPServer, ThreadingHTTPServer\nserver = ThreadingHTTPServer(('', 8080), Handler)\n"
+        patched = SkillRunner._patch_source(src)
+        # Should be unchanged.
+        assert patched == src
+
+    def test_no_httpserver_unchanged(self):
+        src = "print('hello world')\n"
+        patched = SkillRunner._patch_source(src)
+        assert patched == src

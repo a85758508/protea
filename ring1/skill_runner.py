@@ -42,6 +42,9 @@ class SkillRunner:
         if self.is_running():
             self.stop()
 
+        # Patch HTTPServer → ThreadingHTTPServer to avoid keep-alive hangs.
+        source_code = self._patch_source(source_code)
+
         # Write source to a temp file.
         fd, script_path = tempfile.mkstemp(suffix=".py", prefix=f"protea_skill_{skill_name}_")
         with os.fdopen(fd, "w") as f:
@@ -144,6 +147,27 @@ class SkillRunner:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _patch_source(source_code: str) -> str:
+        """Patch HTTPServer → ThreadingHTTPServer to avoid keep-alive hangs.
+
+        1. Add ThreadingHTTPServer to the import if not already present.
+        2. Replace ``HTTPServer(`` with ``ThreadingHTTPServer(`` in constructor calls.
+        """
+        if "ThreadingHTTPServer" in source_code:
+            return source_code
+
+        # Add ThreadingHTTPServer to the import line.
+        source_code = source_code.replace(
+            "from http.server import HTTPServer",
+            "from http.server import HTTPServer, ThreadingHTTPServer",
+        )
+
+        # Replace constructor calls: HTTPServer( → ThreadingHTTPServer(
+        source_code = source_code.replace("HTTPServer(", "ThreadingHTTPServer(")
+
+        return source_code
 
     _PORT_RE = re.compile(r"(?:port\s+|localhost:)(\d{2,5})", re.IGNORECASE)
 

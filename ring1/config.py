@@ -23,7 +23,7 @@ class Ring1Config(NamedTuple):
     p1_check_interval_sec: int
     workspace_path: str = "."
     shell_timeout: int = 30
-    max_tool_rounds: int = 10
+    max_tool_rounds: int = 25
 
 
 def _load_dotenv(project_root: pathlib.Path) -> None:
@@ -79,5 +79,5 @@ def load_ring1_config(project_root: pathlib.Path) -> Ring1Config:
         p1_check_interval_sec=autonomy.get("check_interval_sec", 60),
         workspace_path=tools.get("workspace_path", "."),
         shell_timeout=tools.get("shell_timeout", 30),
-        max_tool_rounds=tools.get("max_tool_rounds", 10),
+        max_tool_rounds=tools.get("max_tool_rounds", 25),
     )
