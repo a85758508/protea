@@ -148,6 +148,7 @@ class TaskExecutor:
         registry: ToolRegistry | None = None,
         memory_store=None,
         skill_store=None,
+        task_store=None,
         p1_enabled: bool = False,
         p1_idle_threshold_sec: int = 600,
         p1_check_interval_sec: int = 60,
@@ -162,6 +163,7 @@ class TaskExecutor:
             registry: ToolRegistry for tool dispatch.  None = no tools.
             memory_store: Optional MemoryStore for experiential memories.
             skill_store: Optional SkillStore for reusable skills.
+            task_store: Optional TaskStore for task persistence.
             p1_enabled: Whether P1 autonomous tasks are enabled.
             p1_idle_threshold_sec: Seconds of idle before triggering P1.
             p1_check_interval_sec: Minimum seconds between P1 checks.
@@ -174,6 +176,7 @@ class TaskExecutor:
         self.registry = registry
         self.memory_store = memory_store
         self.skill_store = skill_store
+        self.task_store = task_store
         self.p1_enabled = p1_enabled
         self.p1_idle_threshold_sec = p1_idle_threshold_sec
         self.p1_check_interval_sec = p1_check_interval_sec
@@ -185,6 +188,7 @@ class TaskExecutor:
     def run(self) -> None:
         """Main loop — blocks on queue, executes tasks serially."""
         log.info("Task executor started")
+        self._recover_tasks()
         while self._running:
             try:
                 task = self.state.task_queue.get(timeout=2)
@@ -196,13 +200,49 @@ class TaskExecutor:
             except Exception:
                 log.error("Task executor: unhandled error", exc_info=True)
                 self.state.p0_active.clear()
+                # Mark task as failed in store
+                if self.task_store and hasattr(task, "task_id"):
+                    try:
+                        self.task_store.set_status(task.task_id, "failed", "unhandled error")
+                    except Exception:
+                        pass
             self._last_p0_time = time.time()
         log.info("Task executor stopped")
+
+    def _recover_tasks(self) -> None:
+        """Recover pending/executing tasks from the store after restart."""
+        if not self.task_store:
+            return
+        try:
+            # Reset executing → pending (interrupted by restart)
+            for t in self.task_store.get_executing():
+                self.task_store.set_status(t["task_id"], "pending")
+            # Re-enqueue all pending tasks
+            from ring1.telegram_bot import Task
+            for t in self.task_store.get_pending():
+                task = Task(
+                    text=t["text"],
+                    chat_id=t["chat_id"],
+                    created_at=t["created_at"],
+                    task_id=t["task_id"],
+                )
+                self.state.task_queue.put(task)
+            count = self.state.task_queue.qsize()
+            if count:
+                log.info("Recovered %d tasks from store", count)
+        except Exception:
+            log.error("Task recovery failed", exc_info=True)
 
     def _execute_task(self, task) -> None:
         """Execute a single task: set p0_active -> LLM call -> reply -> clear."""
         log.info("P0 task received: %s", task.text[:80])
         self.state.p0_active.set()
+        # Mark executing in store
+        if self.task_store:
+            try:
+                self.task_store.set_status(task.task_id, "executing")
+            except Exception:
+                log.debug("Failed to mark task executing", exc_info=True)
         start = time.time()
         response = ""
         try:
@@ -260,6 +300,17 @@ class TaskExecutor:
         finally:
             self.state.p0_active.clear()
             duration = time.time() - start
+            now = time.time()
+            with self.state.lock:
+                self.state.last_task_completion = now
+            # Mark completed in store
+            if self.task_store:
+                try:
+                    self.task_store.set_status(
+                        task.task_id, "completed", response[:500],
+                    )
+                except Exception:
+                    log.debug("Failed to mark task completed", exc_info=True)
             log.info("P0 task done (%.1fs): %s", duration, response[:80])
             # Record task in memory
             if self.memory_store:
@@ -436,6 +487,7 @@ def create_executor(
     memory_store=None,
     skill_store=None,
     skill_runner=None,
+    task_store=None,
 ) -> TaskExecutor | None:
     """Create a TaskExecutor from Ring1Config, or None if no API key."""
     if not config.claude_api_key:
@@ -480,6 +532,7 @@ def create_executor(
         registry=registry,
         memory_store=memory_store,
         skill_store=skill_store,
+        task_store=task_store,
         p1_enabled=config.p1_enabled,
         p1_idle_threshold_sec=config.p1_idle_threshold_sec,
         p1_check_interval_sec=config.p1_check_interval_sec,

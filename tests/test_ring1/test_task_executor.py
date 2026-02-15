@@ -765,3 +765,220 @@ class TestSystemPrompt:
         assert "exec" in TASK_SYSTEM_PROMPT
         assert "message" in TASK_SYSTEM_PROMPT
         assert "spawn" in TASK_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# TestTaskPersistence
+# ---------------------------------------------------------------------------
+
+class TestTaskPersistence:
+    """Test TaskExecutor task_store integration."""
+
+    def test_task_store_marked_executing_then_completed(self, tmp_path):
+        from ring0.task_store import TaskStore
+        state = _make_state()
+        ring2 = tmp_path / "ring2"
+        ring2.mkdir()
+        (ring2 / "main.py").write_text("code")
+
+        ts = TaskStore(tmp_path / "tasks.db")
+        client = MagicMock()
+        client.send_message_with_tools.return_value = "answer"
+        reply_fn = MagicMock()
+        registry = _make_registry()
+
+        executor = TaskExecutor(
+            state, client, ring2, reply_fn,
+            registry=registry, task_store=ts,
+        )
+        task = Task(text="What is 2+2?", chat_id="123")
+        ts.add(task.task_id, task.text, task.chat_id, task.created_at)
+
+        executor._execute_task(task)
+
+        rows = ts.get_recent(1)
+        assert rows[0]["status"] == "completed"
+        assert rows[0]["result"] != ""
+        assert rows[0]["completed_at"] is not None
+
+    def test_task_store_not_required(self, tmp_path):
+        """Executor without task_store should work fine."""
+        state = _make_state()
+        ring2 = tmp_path / "ring2"
+        ring2.mkdir()
+        (ring2 / "main.py").write_text("code")
+
+        client = MagicMock()
+        client.send_message_with_tools.return_value = "answer"
+        reply_fn = MagicMock()
+        registry = _make_registry()
+
+        executor = TaskExecutor(
+            state, client, ring2, reply_fn,
+            registry=registry, task_store=None,
+        )
+        task = Task(text="hello", chat_id="123")
+        executor._execute_task(task)
+        reply_fn.assert_called_once_with("answer")
+
+    def test_last_task_completion_updated(self, tmp_path):
+        state = _make_state()
+        ring2 = tmp_path / "ring2"
+        ring2.mkdir()
+        (ring2 / "main.py").write_text("code")
+
+        client = MagicMock()
+        client.send_message_with_tools.return_value = "answer"
+        reply_fn = MagicMock()
+        registry = _make_registry()
+
+        executor = TaskExecutor(state, client, ring2, reply_fn, registry=registry)
+        task = Task(text="test", chat_id="123")
+
+        before = time.time()
+        executor._execute_task(task)
+        after = time.time()
+
+        assert before <= state.last_task_completion <= after
+
+    def test_create_executor_passes_task_store(self):
+        cfg = MagicMock()
+        cfg.claude_api_key = "sk-test"
+        cfg.claude_model = "test-model"
+        cfg.claude_max_tokens = 4096
+        cfg.p1_enabled = False
+        cfg.p1_idle_threshold_sec = 600
+        cfg.p1_check_interval_sec = 60
+        cfg.workspace_path = "."
+        cfg.shell_timeout = 30
+        cfg.max_tool_rounds = 10
+        state = _make_state()
+        ts = MagicMock()
+        result = create_executor(
+            cfg, state, pathlib.Path("/tmp"), MagicMock(), task_store=ts,
+        )
+        assert result.task_store is ts
+
+
+# ---------------------------------------------------------------------------
+# TestTaskRecovery
+# ---------------------------------------------------------------------------
+
+class TestTaskRecovery:
+    """Test _recover_tasks restores pending/executing tasks after restart."""
+
+    def test_recover_pending_tasks(self, tmp_path):
+        from ring0.task_store import TaskStore
+        state = _make_state()
+        ts = TaskStore(tmp_path / "tasks.db")
+        ts.add("t-1", "task one", "c1", created_at=100.0)
+        ts.add("t-2", "task two", "c1", created_at=200.0)
+
+        client = MagicMock()
+        reply_fn = MagicMock()
+        executor = TaskExecutor(
+            state, client, tmp_path, reply_fn, task_store=ts,
+        )
+        executor._recover_tasks()
+
+        assert state.task_queue.qsize() == 2
+        t1 = state.task_queue.get_nowait()
+        assert t1.task_id == "t-1"
+        t2 = state.task_queue.get_nowait()
+        assert t2.task_id == "t-2"
+
+    def test_recover_executing_reset_to_pending(self, tmp_path):
+        from ring0.task_store import TaskStore
+        state = _make_state()
+        ts = TaskStore(tmp_path / "tasks.db")
+        ts.add("t-1", "interrupted", "c1")
+        ts.set_status("t-1", "executing")
+
+        client = MagicMock()
+        reply_fn = MagicMock()
+        executor = TaskExecutor(
+            state, client, tmp_path, reply_fn, task_store=ts,
+        )
+        executor._recover_tasks()
+
+        # Should be re-enqueued
+        assert state.task_queue.qsize() == 1
+        task = state.task_queue.get_nowait()
+        assert task.task_id == "t-1"
+        assert task.text == "interrupted"
+
+    def test_recover_skips_completed(self, tmp_path):
+        from ring0.task_store import TaskStore
+        state = _make_state()
+        ts = TaskStore(tmp_path / "tasks.db")
+        ts.add("t-1", "done", "c1")
+        ts.set_status("t-1", "completed", "result")
+        ts.add("t-2", "pending", "c1")
+
+        client = MagicMock()
+        reply_fn = MagicMock()
+        executor = TaskExecutor(
+            state, client, tmp_path, reply_fn, task_store=ts,
+        )
+        executor._recover_tasks()
+
+        assert state.task_queue.qsize() == 1
+        task = state.task_queue.get_nowait()
+        assert task.task_id == "t-2"
+
+    def test_recover_no_store(self):
+        state = _make_state()
+        client = MagicMock()
+        reply_fn = MagicMock()
+        executor = TaskExecutor(
+            state, client, pathlib.Path("/tmp"), reply_fn, task_store=None,
+        )
+        executor._recover_tasks()  # should not raise
+        assert state.task_queue.qsize() == 0
+
+    def test_recover_empty_store(self, tmp_path):
+        from ring0.task_store import TaskStore
+        state = _make_state()
+        ts = TaskStore(tmp_path / "tasks.db")
+
+        client = MagicMock()
+        reply_fn = MagicMock()
+        executor = TaskExecutor(
+            state, client, tmp_path, reply_fn, task_store=ts,
+        )
+        executor._recover_tasks()
+        assert state.task_queue.qsize() == 0
+
+    def test_run_calls_recover(self, tmp_path):
+        """run() should call _recover_tasks before entering the loop."""
+        from ring0.task_store import TaskStore
+        state = _make_state()
+        ts = TaskStore(tmp_path / "tasks.db")
+        ts.add("t-1", "recover me", "c1")
+
+        ring2 = tmp_path / "ring2"
+        ring2.mkdir()
+        (ring2 / "main.py").write_text("code")
+
+        client = MagicMock()
+        client.send_message_with_tools.return_value = "recovered answer"
+        reply_fn = MagicMock()
+        registry = _make_registry()
+
+        executor = TaskExecutor(
+            state, client, ring2, reply_fn,
+            registry=registry, task_store=ts,
+        )
+
+        thread = start_executor_thread(executor)
+        deadline = time.time() + 5
+        while time.time() < deadline and not reply_fn.called:
+            time.sleep(0.1)
+
+        assert reply_fn.called
+        executor.stop()
+        thread.join(timeout=5)
+
+        # Task should be completed in store
+        rows = ts.get_recent(1)
+        assert rows[0]["status"] == "completed"

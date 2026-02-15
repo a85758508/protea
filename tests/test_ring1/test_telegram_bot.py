@@ -1123,3 +1123,142 @@ class TestCallbackQuery:
             thread.join(timeout=5)
         finally:
             server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# TestStatusExecutorHealth
+# ---------------------------------------------------------------------------
+
+class TestStatusExecutorHealth:
+    """Test /status shows executor health information."""
+
+    def test_status_shows_executor_offline(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/status")
+            assert "执行器 (Executor)" in reply
+            assert "🔴 离线" in reply
+        finally:
+            server.shutdown()
+
+    def test_status_shows_executor_alive(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            # Simulate a live executor thread
+            t = threading.Thread(target=lambda: time.sleep(10), daemon=True)
+            t.start()
+            bot.state.executor_thread = t
+            reply = bot._handle_command("/status")
+            assert "🟢 正常" in reply
+        finally:
+            server.shutdown()
+
+    def test_status_shows_queued_tasks(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            bot.state.task_queue.put("dummy")
+            bot.state.task_queue.put("dummy2")
+            reply = bot._handle_command("/status")
+            assert "排队任务 (Queued): 2" in reply
+        finally:
+            server.shutdown()
+
+    def test_status_shows_last_completion(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            bot.state.last_task_completion = time.time() - 30
+            reply = bot._handle_command("/status")
+            assert "上次完成 (Last done):" in reply
+            assert "30s ago" in reply or "31s ago" in reply
+        finally:
+            server.shutdown()
+
+    def test_status_no_last_completion(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            # last_task_completion is 0.0 by default
+            reply = bot._handle_command("/status")
+            assert "上次完成" not in reply
+        finally:
+            server.shutdown()
+
+    def test_snapshot_includes_executor_fields(self):
+        state = SentinelState()
+        snap = state.snapshot()
+        assert "executor_alive" in snap
+        assert snap["executor_alive"] is False
+        assert "last_task_completion" in snap
+        assert snap["last_task_completion"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestTasksWithStore
+# ---------------------------------------------------------------------------
+
+class TestTasksWithStore:
+    """Test /tasks shows recent tasks from task_store."""
+
+    def test_tasks_shows_recent_from_store(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            from ring0.task_store import TaskStore
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            ts = TaskStore(tmp_path / "tasks.db")
+            ts.add("t-1", "first task", "c1", created_at=100.0)
+            ts.add("t-2", "second task longer than forty characters here truncated", "c1", created_at=200.0)
+            ts.set_status("t-1", "completed", "done")
+            bot.state.task_store = ts
+            reply = bot._handle_command("/tasks")
+            assert "最近任务 (Recent):" in reply
+            assert "✅ t-1:" in reply
+            assert "⏳ t-2:" in reply
+        finally:
+            server.shutdown()
+
+    def test_tasks_no_store_shows_basic(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            reply = bot._handle_command("/tasks")
+            assert "*任务队列 (Task Queue):*" in reply
+            assert "最近任务" not in reply
+        finally:
+            server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# TestEnqueuePersistence
+# ---------------------------------------------------------------------------
+
+class TestEnqueuePersistence:
+    """Test that _enqueue_task persists to task_store."""
+
+    def test_enqueue_persists(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            from ring0.task_store import TaskStore
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            ts = TaskStore(tmp_path / "tasks.db")
+            bot.state.task_store = ts
+            bot._handle_command("hello world", chat_id="12345")
+            assert ts.count() == 1
+            rows = ts.get_recent(1)
+            assert rows[0]["text"] == "hello world"
+            assert rows[0]["status"] == "pending"
+        finally:
+            server.shutdown()
+
+    def test_enqueue_without_store(self, tmp_path, monkeypatch):
+        server, port = _make_server()
+        try:
+            bot = _make_bot(port, tmp_path, monkeypatch)
+            # task_store is None — should not raise
+            reply = bot._handle_command("hello", chat_id="12345")
+            assert "收到" in reply
+        finally:
+            server.shutdown()

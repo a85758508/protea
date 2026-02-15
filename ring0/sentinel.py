@@ -207,6 +207,16 @@ def _create_skill_store(db_path):
         return None
 
 
+def _create_task_store(db_path):
+    """Best-effort TaskStore creation.  Returns None on any error."""
+    try:
+        from ring0.task_store import TaskStore
+        return TaskStore(db_path)
+    except Exception as exc:
+        log.debug("TaskStore not available: %s", exc)
+        return None
+
+
 def _create_skill_runner():
     """Best-effort SkillRunner creation.  Returns None on any error."""
     try:
@@ -262,16 +272,17 @@ def _create_portal(project_root, cfg, skill_store, skill_runner):
         return None
 
 
-def _create_executor(project_root, state, ring2_path, reply_fn, memory_store=None, skill_store=None, skill_runner=None):
+def _create_executor(project_root, state, ring2_path, reply_fn, memory_store=None, skill_store=None, skill_runner=None, task_store=None):
     """Best-effort task executor creation.  Returns None on any error."""
     try:
         from ring1.config import load_ring1_config
         from ring1.task_executor import create_executor, start_executor_thread
 
         r1_config = load_ring1_config(project_root)
-        executor = create_executor(r1_config, state, ring2_path, reply_fn, memory_store=memory_store, skill_store=skill_store, skill_runner=skill_runner)
+        executor = create_executor(r1_config, state, ring2_path, reply_fn, memory_store=memory_store, skill_store=skill_store, skill_runner=skill_runner, task_store=task_store)
         if executor:
-            start_executor_thread(executor)
+            thread = start_executor_thread(executor)
+            state.executor_thread = thread
             log.info("Task executor started")
         return executor
     except Exception as exc:
@@ -299,6 +310,7 @@ def run(project_root: pathlib.Path) -> None:
     fitness = FitnessTracker(db_path)
     memory_store = _create_memory_store(db_path)
     skill_store = _create_skill_store(db_path)
+    task_store = _create_task_store(db_path)
     hb = HeartbeatMonitor(heartbeat_path, timeout_sec=timeout)
     notifier = _create_notifier(project_root)
 
@@ -309,11 +321,12 @@ def run(project_root: pathlib.Path) -> None:
     state.memory_store = memory_store
     state.skill_store = skill_store
     state.skill_runner = skill_runner
+    state.task_store = task_store
     bot = _create_bot(project_root, state, fitness, ring2_path)
 
     # Task executor for P0 user tasks.
     reply_fn = bot._send_reply if bot else (lambda text: None)
-    executor = _create_executor(project_root, state, ring2_path, reply_fn, memory_store=memory_store, skill_store=skill_store, skill_runner=skill_runner)
+    executor = _create_executor(project_root, state, ring2_path, reply_fn, memory_store=memory_store, skill_store=skill_store, skill_runner=skill_runner, task_store=task_store)
     # Expose subagent_manager on state for /background command.
     state.subagent_manager = getattr(executor, "subagent_manager", None) if executor else None
 
