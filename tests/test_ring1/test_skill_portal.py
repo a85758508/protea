@@ -247,8 +247,46 @@ class TestReportsPage:
         try:
             code, body = _get(portal, "/reports")
             assert code == 200
-            assert "analysis.html" in body
-            assert "summary.html" in body
+            # Grouped by stem — card titles show stem names
+            assert "analysis" in body
+            assert "summary" in body
+        finally:
+            portal.stop()
+
+    def test_lists_md_and_pdf(self, tmp_path):
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        (reports_dir / "research.md").write_text("# Research")
+        (reports_dir / "research.pdf").write_bytes(b"%PDF-1.4 fake")
+        portal = _start_portal(tmp_path)
+        try:
+            code, body = _get(portal, "/reports")
+            assert code == 200
+            assert "research" in body
+            assert "MD" in body
+            assert "PDF" in body
+        finally:
+            portal.stop()
+
+    def test_multi_format_grouped(self, tmp_path):
+        """Same stem with .html, .md, .pdf should appear as one card."""
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        (reports_dir / "report.html").write_text("<h1>HTML</h1>")
+        (reports_dir / "report.md").write_text("# MD")
+        (reports_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+        portal = _start_portal(tmp_path)
+        try:
+            code, body = _get(portal, "/reports")
+            assert code == 200
+            # One card for "report" with all three format badges
+            assert "HTML" in body
+            assert "MD" in body
+            assert "PDF" in body
+            # Links to all three files
+            assert "/reports/report.html" in body
+            assert "/reports/report.md" in body
+            assert "/reports/report.pdf" in body
         finally:
             portal.stop()
 
@@ -274,7 +312,35 @@ class TestReportsPage:
         finally:
             portal.stop()
 
-    def test_reject_non_html(self, tmp_path):
+    def test_serve_markdown(self, tmp_path):
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        (reports_dir / "notes.md").write_text("# Notes\n\nHello world")
+        portal = _start_portal(tmp_path)
+        try:
+            code, body = _get(portal, "/reports/notes.md")
+            assert code == 200
+            assert "# Notes" in body
+        finally:
+            portal.stop()
+
+    def test_serve_pdf(self, tmp_path):
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        pdf_content = b"%PDF-1.4 fake pdf content"
+        (reports_dir / "doc.pdf").write_bytes(pdf_content)
+        portal = _start_portal(tmp_path)
+        try:
+            url = f"http://127.0.0.1:{portal.actual_port}/reports/doc.pdf"
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                assert resp.status == 200
+                assert resp.headers["Content-Type"] == "application/pdf"
+                data = resp.read()
+                assert data == pdf_content
+        finally:
+            portal.stop()
+
+    def test_reject_unsupported_extension(self, tmp_path):
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         (reports_dir / "data.json").write_text("{}")

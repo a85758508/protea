@@ -188,6 +188,8 @@ class PortalHandler(BaseHTTPRequestHandler):
 
         self._send_html(_page(name, body, _CARD_CSS))
 
+    _REPORT_EXTENSIONS = {".html", ".md", ".pdf"}
+
     def _serve_reports_list(self) -> None:
         reports_dir = self.reports_dir
         if reports_dir is None or not reports_dir.is_dir():
@@ -195,26 +197,68 @@ class PortalHandler(BaseHTTPRequestHandler):
             self._send_html(_page("Reports", body))
             return
 
-        files = sorted(reports_dir.glob("*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+        # Collect all supported report files
+        files: list[pathlib.Path] = []
+        for ext in sorted(self._REPORT_EXTENSIONS):
+            files.extend(reports_dir.glob(f"*{ext}"))
+
         if not files:
             body = '<p style="color:#777">No reports available yet.</p>'
-        else:
-            items = []
-            for f in files:
-                mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(f.stat().st_mtime))
-                size_kb = f.stat().st_size / 1024
-                items.append(
-                    f'<a href="/reports/{f.name}" class="card">'
-                    f"<h3>{f.name}</h3>"
-                    f'<div class="meta"><span>{mtime}</span><span>{size_kb:.1f} KB</span></div>'
-                    f"</a>"
+            self._send_html(_page("Reports", body, _CARD_CSS))
+            return
+
+        # Group by stem (filename without extension)
+        groups: dict[str, list[pathlib.Path]] = {}
+        for f in files:
+            groups.setdefault(f.stem, []).append(f)
+
+        # Sort groups by newest file mtime descending
+        sorted_groups = sorted(
+            groups.items(),
+            key=lambda kv: max(f.stat().st_mtime for f in kv[1]),
+            reverse=True,
+        )
+
+        badge_colors = {
+            ".html": ("HTML", "#e74c3c"),
+            ".md": ("MD", "#3498db"),
+            ".pdf": ("PDF", "#27ae60"),
+        }
+
+        items = []
+        for stem, group_files in sorted_groups:
+            newest = max(group_files, key=lambda f: f.stat().st_mtime)
+            mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(newest.stat().st_mtime))
+            # Format badges / links for each available format
+            format_links = []
+            for f in sorted(group_files, key=lambda f: f.suffix):
+                label, color = badge_colors.get(f.suffix, (f.suffix.upper(), "#999"))
+                format_links.append(
+                    f'<a href="/reports/{f.name}" class="badge" '
+                    f'style="background:rgba(255,255,255,0.05);color:{color};'
+                    f'border:1px solid {color};margin-right:0.3rem">{label}</a>'
                 )
-            body = '<div class="grid">' + "".join(items) + "</div>"
+            formats_html = "".join(format_links)
+            items.append(
+                f'<div class="card">'
+                f"<h3>{stem}</h3>"
+                f'<div class="tags" style="margin:0.5rem 0">{formats_html}</div>'
+                f'<div class="meta"><span>{mtime}</span></div>'
+                f"</div>"
+            )
+        body = '<div class="grid">' + "".join(items) + "</div>"
         self._send_html(_page("Reports", body, _CARD_CSS))
 
+    _CONTENT_TYPES = {
+        ".html": "text/html; charset=utf-8",
+        ".md": "text/plain; charset=utf-8",
+        ".pdf": "application/pdf",
+    }
+
     def _serve_report_file(self, filename: str) -> None:
-        if not filename.endswith(".html"):
-            self._send_error(403, "Only .html files are served")
+        suffix = pathlib.Path(filename).suffix.lower()
+        if suffix not in self._REPORT_EXTENSIONS:
+            self._send_error(403, f"Only {', '.join(sorted(self._REPORT_EXTENSIONS))} files are served")
             return
         reports_dir = self.reports_dir
         if reports_dir is None:
@@ -228,8 +272,12 @@ class PortalHandler(BaseHTTPRequestHandler):
         if not filepath.is_file():
             self._send_error(404, "Report not found")
             return
-        content = filepath.read_text(errors="replace")
-        self._send_html(content)
+        content_type = self._CONTENT_TYPES.get(suffix, "application/octet-stream")
+        if suffix == ".pdf":
+            data = filepath.read_bytes()
+        else:
+            data = filepath.read_text(errors="replace").encode("utf-8")
+        self._send_response(200, content_type, data)
 
     def _serve_api_skills(self) -> None:
         self._send_json(self._get_skills_with_status())
@@ -276,13 +324,16 @@ class PortalHandler(BaseHTTPRequestHandler):
             result.append(entry)
         return result
 
-    def _send_html(self, html: str) -> None:
-        data = html.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+    def _send_response(self, code: int, content_type: str, data: bytes) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_html(self, html: str) -> None:
+        data = html.encode("utf-8")
+        self._send_response(200, "text/html; charset=utf-8", data)
 
     def _send_json(self, obj: object) -> None:
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")

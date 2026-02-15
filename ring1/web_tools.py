@@ -16,7 +16,7 @@ from html.parser import HTMLParser
 
 log = logging.getLogger("protea.web_tools")
 
-_TIMEOUT = 10  # seconds
+_TIMEOUT = 30  # seconds
 _MAX_FETCH_BYTES = 100_000  # 100 KB read limit for web_fetch
 _DDG_URL = "https://html.duckduckgo.com/html/"
 _USER_AGENT = "Mozilla/5.0 (compatible; Protea/1.0)"

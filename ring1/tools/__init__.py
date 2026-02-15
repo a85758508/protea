@@ -30,6 +30,7 @@ def create_default_registry(
     """
     from ring1.tools.filesystem import make_filesystem_tools
     from ring1.tools.message import make_message_tool
+    from ring1.tools.report import make_report_tool
     from ring1.tools.shell import make_shell_tool
     from ring1.tools.web import make_web_tools
 
@@ -42,6 +43,7 @@ def create_default_registry(
         registry.register(tool)
 
     registry.register(make_shell_tool(workspace_path, timeout=shell_timeout))
+    registry.register(make_report_tool(workspace_path))
 
     if reply_fn is not None:
         registry.register(make_message_tool(reply_fn))
@@ -50,8 +52,13 @@ def create_default_registry(
         from ring1.tools.spawn import make_spawn_tool
         registry.register(make_spawn_tool(subagent_manager))
 
-    if skill_store is not None and skill_runner is not None:
-        from ring1.tools.skill import make_run_skill_tool
-        registry.register(make_run_skill_tool(skill_store, skill_runner))
+    if skill_store is not None:
+        from ring1.tools.skill import make_edit_skill_tool, make_view_skill_tool
+        registry.register(make_view_skill_tool(skill_store))
+        registry.register(make_edit_skill_tool(skill_store))
+
+        if skill_runner is not None:
+            from ring1.tools.skill import make_run_skill_tool
+            registry.register(make_run_skill_tool(skill_store, skill_runner))
 
     return registry
