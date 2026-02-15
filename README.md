@@ -18,16 +18,16 @@ Three-ring design running on a single Mac mini:
 ## Quick Start
 
 ```bash
-# Remote install (clones repo, creates venv, .env, ring2 git, runs tests)
+# Remote install (clones repo, creates venv, configures .env, runs tests)
 curl -sSL https://raw.githubusercontent.com/Drlucaslu/protea/main/setup.sh | bash
-cd protea && source .venv/bin/activate && python run.py
+cd protea && .venv/bin/python run.py
 ```
 
 Or if you already cloned the repo:
 
 ```bash
 bash setup.sh
-source .venv/bin/activate && python run.py
+.venv/bin/python run.py
 ```
 
 ## Project Structure

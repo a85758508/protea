@@ -45,19 +45,46 @@ echo "[ok] Git $(git --version | awk '{print $3}')"
 if [ ! -d .venv ]; then
     echo "[..] Creating virtual environment..."
     python3 -m venv .venv
-    echo "[ok] Created .venv"
-else
-    echo "[ok] .venv already exists"
 fi
 
-# Activate venv
-source .venv/bin/activate
+# Verify venv was created properly
+if [ ! -f .venv/bin/activate ]; then
+    echo "ERROR: venv creation failed — .venv/bin/activate not found."
+    echo "  On Debian/Ubuntu, install: sudo apt install python3-venv"
+    exit 1
+fi
+echo "[ok] Virtual environment ready"
 
-# 4. Copy .env.example -> .env if needed
+# Use venv python directly (no need to source activate)
+PY=.venv/bin/python
+
+# 4. Configure .env interactively
 if [ ! -f .env ]; then
-    cp .env.example .env
-    echo "[ok] Created .env from .env.example"
-    echo "     >>> Edit .env and set CLAUDE_API_KEY (required) <<<"
+    echo
+    echo "=== Configuration ==="
+    echo
+
+    # Read from /dev/tty so this works even when piped via curl
+    read -p "CLAUDE_API_KEY (required): " api_key < /dev/tty
+    if [ -z "$api_key" ]; then
+        echo "ERROR: CLAUDE_API_KEY is required."
+        exit 1
+    fi
+
+    read -p "TELEGRAM_BOT_TOKEN (optional, press Enter to skip): " tg_token < /dev/tty
+    read -p "TELEGRAM_CHAT_ID (optional, press Enter to skip): " tg_chat < /dev/tty
+
+    cat > .env <<EOF
+# Claude API Key (used by Ring 1 evolution engine)
+CLAUDE_API_KEY=$api_key
+
+# Telegram Bot Token (used for notifications in Phase 2+)
+TELEGRAM_BOT_TOKEN=$tg_token
+
+# Telegram Chat ID
+TELEGRAM_CHAT_ID=$tg_chat
+EOF
+    echo "[ok] Created .env"
 else
     echo "[ok] .env already exists"
 fi
@@ -80,13 +107,11 @@ echo "[ok] data/ and output/ directories ready"
 # 7. Run tests
 echo
 echo "=== Running Tests ==="
-python -m pytest tests/ -v
+$PY -m pytest tests/ -v
 
 # 8. Done
 echo
 echo "=== Setup Complete ==="
 echo
-echo "Next steps:"
-echo "  1. Edit .env and set CLAUDE_API_KEY (required)"
-echo "  2. Optionally set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"
-echo "  3. Run: cd $(pwd) && source .venv/bin/activate && python run.py"
+echo "To start Protea:"
+echo "  cd $(pwd) && .venv/bin/python run.py"
