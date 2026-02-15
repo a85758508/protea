@@ -1,37 +1,30 @@
-"""Tests for ring1.registry_client — RegistryClient against a live server."""
+"""Tests for ring1.registry_client — RegistryClient with mocked HTTP."""
 
 from __future__ import annotations
 
-import threading
-import time
+import io
+import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from registry.server import RegistryServer
-from registry.store import RegistryStore
 from ring1.registry_client import RegistryClient
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def live_server(tmp_path):
-    """Start a temporary RegistryServer and return (client, store)."""
-    store = RegistryStore(tmp_path / "reg.db")
-    srv = RegistryServer(store, host="127.0.0.1", port=0)
-    t = threading.Thread(target=srv.run, daemon=True)
-    t.start()
-    for _ in range(50):
-        if srv.actual_port != 0:
-            break
-        time.sleep(0.05)
-    url = f"http://127.0.0.1:{srv.actual_port}"
-    client = RegistryClient(url, node_id="test-node")
-    yield client, store
-    srv.stop()
+def _mock_response(data: dict | list, status: int = 200) -> MagicMock:
+    """Create a mock urllib response that works as a context manager."""
+    raw = json.dumps(data).encode("utf-8")
+    resp = MagicMock()
+    resp.read.return_value = raw
+    resp.status = status
+    resp.__enter__ = lambda s: s
+    resp.__exit__ = MagicMock(return_value=False)
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -40,88 +33,151 @@ def live_server(tmp_path):
 
 
 class TestPublish:
-    def test_publish_returns_dict(self, live_server):
-        client, store = live_server
+    @patch("urllib.request.urlopen")
+    def test_publish_returns_dict(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response(
+            {"name": "greet", "version": 1, "node_id": "test-node"}
+        )
+        client = RegistryClient("http://registry:8761", node_id="test-node")
         result = client.publish("greet", "Greeting skill", "Hello {{name}}", tags=["greeting"])
         assert result is not None
         assert result["name"] == "greet"
         assert result["version"] == 1
+        # Verify the request was built correctly.
+        req = mock_urlopen.call_args[0][0]
+        assert req.method == "POST"
+        assert req.full_url == "http://registry:8761/api/skills"
+        body = json.loads(req.data.decode("utf-8"))
+        assert body["node_id"] == "test-node"
+        assert body["name"] == "greet"
+        assert body["tags"] == ["greeting"]
 
-    def test_publish_update_bumps_version(self, live_server):
-        client, store = live_server
-        client.publish("greet", "v1", "t1")
+    @patch("urllib.request.urlopen")
+    def test_publish_update_bumps_version(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response({"name": "greet", "version": 2})
+        client = RegistryClient("http://registry:8761", node_id="test-node")
         result = client.publish("greet", "v2", "t2")
         assert result["version"] == 2
 
 
 class TestSearch:
-    def test_search_all(self, live_server):
-        client, store = live_server
-        client.publish("alpha", "Alpha skill", "t")
-        client.publish("beta", "Beta skill", "t")
+    @patch("urllib.request.urlopen")
+    def test_search_all(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response([
+            {"name": "alpha", "description": "Alpha skill"},
+            {"name": "beta", "description": "Beta skill"},
+        ])
+        client = RegistryClient("http://registry:8761", node_id="test-node")
         results = client.search()
         assert len(results) == 2
+        req = mock_urlopen.call_args[0][0]
+        assert req.method == "GET"
+        assert "limit=50" in req.full_url
 
-    def test_search_query(self, live_server):
-        client, store = live_server
-        client.publish("web-tool", "Web utility", "t")
-        client.publish("data-tool", "Data utility", "t")
+    @patch("urllib.request.urlopen")
+    def test_search_query(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response([
+            {"name": "web-tool", "description": "Web utility"},
+        ])
+        client = RegistryClient("http://registry:8761", node_id="test-node")
         results = client.search(query="web")
         assert len(results) == 1
         assert results[0]["name"] == "web-tool"
+        req = mock_urlopen.call_args[0][0]
+        assert "q=web" in req.full_url
 
-    def test_search_tag(self, live_server):
-        client, store = live_server
-        client.publish("s1", "d", "t", tags=["api"])
-        client.publish("s2", "d", "t", tags=["web"])
+    @patch("urllib.request.urlopen")
+    def test_search_tag(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response([
+            {"name": "s1", "tags": ["api"]},
+        ])
+        client = RegistryClient("http://registry:8761", node_id="test-node")
         results = client.search(tag="api")
         assert len(results) == 1
-        assert results[0]["name"] == "s1"
+        req = mock_urlopen.call_args[0][0]
+        assert "tag=api" in req.full_url
 
 
 class TestDownload:
-    def test_download_increments_count(self, live_server):
-        client, store = live_server
-        client.publish("greet", "d", "t")
+    @patch("urllib.request.urlopen")
+    def test_download_returns_skill(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response(
+            {"name": "greet", "downloads": 1}
+        )
+        client = RegistryClient("http://registry:8761", node_id="test-node")
         skill = client.download("test-node", "greet")
         assert skill is not None
+        assert skill["name"] == "greet"
         assert skill["downloads"] == 1
-        skill = client.download("test-node", "greet")
-        assert skill["downloads"] == 2
+        req = mock_urlopen.call_args[0][0]
+        assert req.method == "GET"
+        assert req.full_url == "http://registry:8761/api/skills/test-node/greet"
 
-    def test_download_not_found(self, live_server):
-        client, store = live_server
+    @patch("urllib.request.urlopen")
+    def test_download_not_found(self, mock_urlopen):
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url="", code=404, msg="Not Found", hdrs={}, fp=io.BytesIO(b""),
+        )
+        client = RegistryClient("http://registry:8761", node_id="test-node", timeout=1)
         assert client.download("x", "missing") is None
 
 
 class TestRate:
-    def test_rate(self, live_server):
-        client, store = live_server
-        client.publish("s", "d", "t")
+    @patch("urllib.request.urlopen")
+    def test_rate_up(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response({"ok": True})
+        client = RegistryClient("http://registry:8761", node_id="test-node")
         assert client.rate("test-node", "s", up=True) is True
-        skill = store.get("test-node", "s")
-        assert skill["rating_up"] == 1
+        req = mock_urlopen.call_args[0][0]
+        assert req.method == "POST"
+        assert "/test-node/s/rate" in req.full_url
+        body = json.loads(req.data.decode("utf-8"))
+        assert body["up"] is True
+
+    @patch("urllib.request.urlopen")
+    def test_rate_down(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response({"ok": True})
+        client = RegistryClient("http://registry:8761", node_id="test-node")
+        assert client.rate("test-node", "s", up=False) is True
+        body = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        assert body["up"] is False
 
 
 class TestUnpublish:
-    def test_unpublish(self, live_server):
-        client, store = live_server
-        client.publish("s", "d", "t")
+    @patch("urllib.request.urlopen")
+    def test_unpublish(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response({"ok": True, "deleted": "test-node/s"})
+        client = RegistryClient("http://registry:8761", node_id="test-node")
         assert client.unpublish("s") is True
-        assert store.get("test-node", "s") is None
+        req = mock_urlopen.call_args[0][0]
+        assert req.method == "DELETE"
+        assert req.full_url == "http://registry:8761/api/skills/test-node/s"
 
-    def test_unpublish_nonexistent(self, live_server):
-        client, store = live_server
+    @patch("urllib.request.urlopen")
+    def test_unpublish_nonexistent(self, mock_urlopen):
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url="", code=404, msg="Not Found", hdrs={}, fp=io.BytesIO(b""),
+        )
+        client = RegistryClient("http://registry:8761", node_id="test-node", timeout=1)
         assert client.unpublish("missing") is False
 
 
 class TestStats:
-    def test_get_stats(self, live_server):
-        client, store = live_server
-        client.publish("s1", "d", "t")
+    @patch("urllib.request.urlopen")
+    def test_get_stats(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response(
+            {"total_skills": 5, "total_nodes": 2, "total_downloads": 10}
+        )
+        client = RegistryClient("http://registry:8761", node_id="test-node")
         stats = client.get_stats()
         assert stats is not None
-        assert stats["total_skills"] == 1
+        assert stats["total_skills"] == 5
+        assert stats["total_nodes"] == 2
+        req = mock_urlopen.call_args[0][0]
+        assert req.method == "GET"
+        assert req.full_url == "http://registry:8761/api/stats"
 
 
 class TestConnectionError:
