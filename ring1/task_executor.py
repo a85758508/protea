@@ -53,6 +53,14 @@ Message tool:
 Background tool:
 - spawn: Start a long-running background task. Results are sent via Telegram when done.
 
+PROGRESS REPORTING RULES:
+- For tasks expected to take > 10 seconds, send an initial progress message.
+- For multi-step tasks (>3 steps), report after each major step.
+- For tasks with iterations/loops, report every N iterations (e.g., every 100).
+- Always report before starting expensive operations (web scraping, file processing).
+- Use emojis for clarity: 🔄 (working), ✅ (done), ❌ (error), 📊 (analyzing).
+- When using spawn, the subagent MUST use message frequently since the user cannot see real-time output.
+
 Skill tools:
 - run_skill: Start a stored skill by name. Returns status, output, HTTP port.
 - view_skill: Read the source code and metadata of a stored skill.
