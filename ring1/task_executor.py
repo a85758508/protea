@@ -53,16 +53,23 @@ Message tool:
 Background tool:
 - spawn: Start a long-running background task. Results are sent via Telegram when done.
 
-Skill tool:
-- run_skill: Start a stored Protea skill by name. Skills are standalone programs
-  crystallized from successful evolution. Returns status, output, and HTTP port
-  if available. Use web_fetch to interact with the skill's API after starting it.
+Skill tools:
+- run_skill: Start a stored skill by name. Returns status, output, HTTP port.
+- view_skill: Read the source code and metadata of a stored skill.
+- edit_skill: Edit a skill's source code using search-and-replace (old_string must be unique).
+  After editing, use run_skill to restart the skill with the updated code.
 
 Use web tools when the user's request requires current information from the web.
 Use file/shell tools when the user asks to read, modify, or explore files and code.
 Use the message tool to keep the user informed during long operations.
 Use spawn for tasks that may take a long time (complex analysis, multi-file operations).
 Do NOT use tools for questions you can answer from your training data alone.
+
+IMPORTANT skill workflow: When working with a skill that exposes an HTTP API, ALWAYS
+call view_skill FIRST to read its source code and understand the correct API endpoints,
+request methods, and parameters. Do NOT guess endpoint paths — check the code.
+If a skill interaction fails, do NOT repeatedly try shell commands to debug. Instead,
+use view_skill to read the source and understand the correct usage.
 """
 
 P1_SYSTEM_PROMPT = """\
@@ -144,7 +151,7 @@ class TaskExecutor:
         p1_enabled: bool = False,
         p1_idle_threshold_sec: int = 600,
         p1_check_interval_sec: int = 60,
-        max_tool_rounds: int = 10,
+        max_tool_rounds: int = 25,
     ) -> None:
         """
         Args:
@@ -184,7 +191,11 @@ class TaskExecutor:
             except queue.Empty:
                 self._check_p1_opportunity()
                 continue
-            self._execute_task(task)
+            try:
+                self._execute_task(task)
+            except Exception:
+                log.error("Task executor: unhandled error", exc_info=True)
+                self.state.p0_active.clear()
             self._last_p0_time = time.time()
         log.info("Task executor stopped")
 
@@ -442,7 +453,7 @@ def create_executor(
 
     workspace = getattr(config, "workspace_path", ".") or "."
     shell_timeout = getattr(config, "shell_timeout", 30)
-    max_tool_rounds = getattr(config, "max_tool_rounds", 10)
+    max_tool_rounds = getattr(config, "max_tool_rounds", 25)
 
     # Create subagent manager (needs registry, so we build in two steps)
     base_registry = create_default_registry(

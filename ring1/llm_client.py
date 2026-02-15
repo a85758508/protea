@@ -91,6 +91,17 @@ class ClaudeClient:
                     time.sleep(delay)
                     continue
                 raise LLMError(f"Claude API network error: {exc}") from exc
+            except (TimeoutError, OSError) as exc:
+                last_error = exc
+                if attempt < _MAX_RETRIES - 1:
+                    delay = _BASE_DELAY * (2 ** attempt)
+                    log.warning(
+                        "Claude API timeout — retry %d/%d in %.1fs",
+                        attempt + 1, _MAX_RETRIES, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise LLMError(f"Claude API timeout: {exc}") from exc
 
         raise LLMError(f"Claude API failed after {_MAX_RETRIES} retries") from last_error
 
@@ -137,8 +148,11 @@ class ClaudeClient:
             The final text response from Claude.
         """
         messages: list[dict] = [{"role": "user", "content": user_message}]
+        # Track the last text seen in a tool_use round as a fallback for
+        # when the loop exhausts without a final end_turn response.
+        last_text_parts: list[str] = []
 
-        for _ in range(max_rounds):
+        for round_idx in range(max_rounds):
             payload = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
@@ -166,6 +180,10 @@ class ClaudeClient:
                     return "\n".join(text_parts)
                 raise LLMError("No text content in API response")
 
+            # Remember text from this round as fallback.
+            if text_parts:
+                last_text_parts = text_parts
+
             # Append assistant message with full content blocks.
             messages.append({"role": "assistant", "content": content_blocks})
 
@@ -188,7 +206,11 @@ class ClaudeClient:
 
             messages.append({"role": "user", "content": tool_results})
 
-        # max_rounds exhausted — return whatever text we have.
-        if text_parts:
-            return "\n".join(text_parts)
-        raise LLMError("Tool use loop exhausted without final response")
+        # max_rounds exhausted — return last seen text or a friendly notice.
+        log.warning("Tool use loop exhausted after %d rounds", max_rounds)
+        if last_text_parts:
+            return "\n".join(last_text_parts)
+        return (
+            "I ran out of tool-call budget before finishing. "
+            "The task may be partially complete — please check and retry if needed."
+        )

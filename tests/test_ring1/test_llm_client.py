@@ -132,6 +132,21 @@ class TestSendMessage:
             client.send_message("system", "hello")
         assert mock_api.call_count == 3
 
+    def test_timeout_raises_llm_error(self, monkeypatch):
+        """Socket TimeoutError should be caught and wrapped as LLMError."""
+        import ring1.llm_client as mod
+        monkeypatch.setattr(mod, "_BASE_DELAY", 0.01)
+
+        # Patch urlopen to raise TimeoutError (simulating socket timeout)
+        def fake_urlopen(*args, **kwargs):
+            raise TimeoutError("The read operation timed out")
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+        client = ClaudeClient(api_key="sk-test")
+        with pytest.raises(LLMError, match="timeout"):
+            client.send_message("system", "hello")
+
 
 # ---------------------------------------------------------------------------
 # TestSendMessageWithTools
@@ -263,8 +278,8 @@ class TestSendMessageWithTools:
         )
         assert result == "Partial"
 
-    def test_max_rounds_exhausted_no_text_raises(self, mock_api):
-        """When max_rounds is exhausted with no text at all, raise LLMError."""
+    def test_max_rounds_exhausted_no_text_returns_notice(self, mock_api):
+        """When max_rounds is exhausted with no text, return a friendly notice."""
         mock_api.response_bodies = [
             {
                 "stop_reason": "tool_use",
@@ -279,10 +294,10 @@ class TestSendMessageWithTools:
             },
         ]
         client = ClaudeClient(api_key="sk-test")
-        with pytest.raises(LLMError, match="loop exhausted"):
-            client.send_message_with_tools(
-                "system", "test", _DUMMY_TOOLS, _dummy_executor, max_rounds=1,
-            )
+        result = client.send_message_with_tools(
+            "system", "test", _DUMMY_TOOLS, _dummy_executor, max_rounds=1,
+        )
+        assert "ran out of tool-call budget" in result
 
     def test_tool_executor_exception_handled(self, mock_api):
         """If tool_executor raises, error string is sent back to Claude."""
