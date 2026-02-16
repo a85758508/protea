@@ -91,8 +91,8 @@ class SubagentManager:
         with self._lock:
             self._tasks[task_id] = result
 
-        # Isolate tools: no spawn (prevent recursion), no message (no direct messaging)
-        isolated_registry = self.registry.clone_without("spawn", "message")
+        # Isolate tools: no spawn (prevent recursion); keep message for progress reporting
+        isolated_registry = self.registry.clone_without("spawn")
 
         thread = threading.Thread(
             target=self._run_subagent,
