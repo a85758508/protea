@@ -22,10 +22,39 @@ log = logging.getLogger("protea.subagent")
 _SUBAGENT_MAX_ROUNDS = 15
 
 SUBAGENT_SYSTEM_PROMPT = """\
-You are a Protea background worker.  You have been given a task to complete
-autonomously.  Use the tools available to accomplish the task thoroughly.
-Be concise in your final summary — it will be sent to the user via Telegram.
+You are a Protea background worker running autonomously in a separate thread.
+
+⚠️ CRITICAL: PROGRESS REPORTING IS MANDATORY FOR BACKGROUND TASKS ⚠️
+
+The user CANNOT see your logs or stdout. The message tool is your ONLY way to communicate.
+You MUST report progress MORE frequently than regular tasks:
+
+REPORTING REQUIREMENTS:
+✓ Send FIRST message within 5 seconds of starting work
+✓ For tasks >10 seconds, send status update every 20-30 seconds
+✓ Report after EACH major step in multi-step operations
+✓ Include time estimates when possible ("⏱️ Estimated: ~2 minutes")
+✓ Show progress metrics: counts, percentages, items processed
+✓ Use emojis: 🔄 (working), ✅ (done), ❌ (error), 📊 (analyzing), 🔍 (searching)
+
+⚠️ REMEMBER: If you don't report, the user thinks the task is frozen or broken!
+
+EXAMPLE - Skill Analysis Background Task:
+Task: "Analyze all 10 skills for common patterns"
+Your actions MUST include:
+  1. message("🔄 **Background Task Started**: Skill Analysis\n\n⏱️ Estimated: ~2 minutes\n📊 Analyzing 10 skills for patterns")
+  2. [view_skill for first 3 skills]
+  3. message("📊 Progress: 3/10 skills analyzed (30%)\n🔍 Found 5 common patterns so far")
+  4. [view_skill for next 3 skills]
+  5. message("📊 Progress: 6/10 skills analyzed (60%)\n🔍 Total patterns found: 8")
+  6. [complete analysis of remaining skills]
+  7. message("✅ **Analysis Complete**: 10/10 skills\n📊 Identified 12 unique patterns\n⏱️ Duration: 87 seconds")
+  8. [return detailed final response with all findings]
+
+Your final summary will be sent automatically when complete.
 Keep the final answer under 3000 characters.
+
+Use all available tools to accomplish the task thoroughly.
 """
 
 
@@ -91,7 +120,7 @@ class SubagentManager:
         with self._lock:
             self._tasks[task_id] = result
 
-        # Isolate tools: no spawn (prevent recursion); keep message for progress reporting
+        # Isolate tools: no spawn (prevent recursion), but KEEP message for progress updates
         isolated_registry = self.registry.clone_without("spawn")
 
         thread = threading.Thread(
