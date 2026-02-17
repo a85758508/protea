@@ -1,3 +1,12 @@
+# Qwen 3.5 (千问 3.5)
+[ring1.llm]
+provider = "qwen"
+api_key_env = "QWEN_API_KEY"
+model = "qwen3.5-plus"
+max_tokens = 8192
+
+
+
 [ring0]
 heartbeat_interval_sec = 2
 heartbeat_timeout_sec = 6
