@@ -81,6 +81,7 @@ def build_evolution_prompt(
     persistent_errors: list[str] | None = None,
     is_plateaued: bool = False,
     gene_pool: list[dict] | None = None,
+    evolution_intent: dict | None = None,
 ) -> tuple[str, str]:
     """Build (system_prompt, user_message) for the evolution LLM call."""
     parts: list[str] = []
@@ -205,25 +206,54 @@ def build_evolution_prompt(
             parts.append(f"- Gen {gen}: {content[:500]}")
         parts.append("")
 
-    # Instructions based on outcome + plateau detection
-    parts.append("## Instructions")
-    if is_plateaued:
-        parts.append(
-            "WARNING: Scores have PLATEAUED. The current approach is stagnant. "
-            "You MUST try something fundamentally different — a new algorithm, "
-            "a new domain, a new interaction pattern. Do NOT make incremental "
-            "changes to the existing code. Start fresh with a novel idea."
-        )
-    elif survived:
-        parts.append(
-            "The previous code survived. Evolve it — try something genuinely "
-            "NEW and different while keeping the heartbeat alive."
-        )
+    # Evolution intent (structured) or legacy instructions (fallback)
+    if evolution_intent:
+        intent = evolution_intent.get("intent", "optimize")
+        signals = evolution_intent.get("signals", [])
+
+        parts.append(f"## Evolution Intent: {intent.upper()}")
+        if intent == "repair":
+            parts.append(
+                "FIX the issues below. Do not add new features "
+                "— focus on making the code survive."
+            )
+            for sig in signals:
+                parts.append(f"- {sig}")
+        elif intent == "explore":
+            parts.append(
+                "Scores have PLATEAUED. Try something fundamentally different "
+                "— new algorithm, new domain."
+            )
+        elif intent == "adapt":
+            parts.append(
+                "Follow the user directive below. Prioritize it above "
+                "all other guidance."
+            )
+        else:  # optimize
+            parts.append(
+                "The code survived. Improve fitness: better output quality, "
+                "novelty, or efficiency."
+            )
     else:
-        parts.append(
-            "The previous code DIED (heartbeat lost). Fix the issue and make it "
-            "more robust. Ensure the heartbeat loop runs reliably."
-        )
+        # Legacy fallback (no evolution_intent provided)
+        parts.append("## Instructions")
+        if is_plateaued:
+            parts.append(
+                "WARNING: Scores have PLATEAUED. The current approach is stagnant. "
+                "You MUST try something fundamentally different — a new algorithm, "
+                "a new domain, a new interaction pattern. Do NOT make incremental "
+                "changes to the existing code. Start fresh with a novel idea."
+            )
+        elif survived:
+            parts.append(
+                "The previous code survived. Evolve it — try something genuinely "
+                "NEW and different while keeping the heartbeat alive."
+            )
+        else:
+            parts.append(
+                "The previous code DIED (heartbeat lost). Fix the issue and make it "
+                "more robust. Ensure the heartbeat loop runs reliably."
+            )
 
     if directive:
         parts.append("")

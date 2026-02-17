@@ -469,6 +469,108 @@ class TestBuildEvolutionPrompt:
         assert gene_pos < instructions_pos
 
 
+class TestEvolutionIntentInPrompt:
+    """Verify ## Evolution Intent section when evolution_intent is provided."""
+
+    def test_repair_intent_section(self):
+        intent = {"intent": "repair", "signals": ["TypeError", "KeyError"]}
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=5,
+            survived=False,
+            evolution_intent=intent,
+        )
+        assert "## Evolution Intent: REPAIR" in user
+        assert "FIX" in user
+        assert "- TypeError" in user
+        assert "- KeyError" in user
+        # Legacy ## Instructions should NOT appear.
+        assert "## Instructions" not in user
+
+    def test_explore_intent_section(self):
+        intent = {"intent": "explore", "signals": ["plateau"]}
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=10,
+            survived=True,
+            is_plateaued=True,
+            evolution_intent=intent,
+        )
+        assert "## Evolution Intent: EXPLORE" in user
+        assert "PLATEAUED" in user
+        assert "## Instructions" not in user
+
+    def test_adapt_intent_section(self):
+        intent = {"intent": "adapt", "signals": ["directive: make a game"]}
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=3,
+            survived=True,
+            directive="make a game",
+            evolution_intent=intent,
+        )
+        assert "## Evolution Intent: ADAPT" in user
+        assert "directive" in user.lower()
+        assert "## Instructions" not in user
+        # User Directive section should still appear.
+        assert "## User Directive" in user
+        assert "make a game" in user
+
+    def test_optimize_intent_section(self):
+        intent = {"intent": "optimize", "signals": ["survived"]}
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=7,
+            survived=True,
+            evolution_intent=intent,
+        )
+        assert "## Evolution Intent: OPTIMIZE" in user
+        assert "survived" in user.lower()
+        assert "## Instructions" not in user
+
+    def test_no_intent_falls_back_to_instructions(self):
+        """Without evolution_intent, legacy ## Instructions section is used."""
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=1,
+            survived=True,
+        )
+        assert "## Instructions" in user
+        assert "## Evolution Intent" not in user
+
+    def test_intent_before_user_directive(self):
+        """Evolution Intent section should appear before User Directive."""
+        intent = {"intent": "adapt", "signals": ["directive: test"]}
+        _, user = build_evolution_prompt(
+            current_source="x=1",
+            fitness_history=[],
+            best_performers=[],
+            params={},
+            generation=1,
+            survived=True,
+            directive="test",
+            evolution_intent=intent,
+        )
+        intent_pos = user.index("## Evolution Intent")
+        directive_pos = user.index("## User Directive")
+        assert intent_pos < directive_pos
+
+
 class TestExtractPythonCode:
     def test_extracts_code_block(self):
         response = 'Some text\n```python\nprint("hello")\n```\nMore text'

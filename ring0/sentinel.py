@@ -192,6 +192,22 @@ def _try_evolve(project_root, fitness, ring2_path, generation, params, survived,
             except Exception:
                 pass
 
+        # Classify evolution intent.
+        from ring0.evolution_intent import classify_intent
+
+        evolution_intent = classify_intent(
+            survived=survived,
+            is_plateaued=is_plateaued,
+            persistent_errors=persistent_errors,
+            crash_logs=crash_logs or [],
+            directive=directive,
+        )
+        log.info(
+            "Evolution intent: %s (signals: %s)",
+            evolution_intent["intent"],
+            evolution_intent["signals"],
+        )
+
         evolver = Evolver(r1_config, fitness, memory_store=memory_store)
         result = evolver.evolve(
             ring2_path=ring2_path,
@@ -206,9 +222,17 @@ def _try_evolve(project_root, fitness, ring2_path, generation, params, survived,
             persistent_errors=persistent_errors,
             is_plateaued=is_plateaued,
             gene_pool=genes,
+            evolution_intent=evolution_intent,
         )
         if result.success:
             log.info("Evolution succeeded: %s", result.reason)
+            if result.metadata:
+                log.info(
+                    "Evolution metadata: intent=%s scope=%s lines_changed=%d",
+                    result.metadata.get("intent"),
+                    result.metadata.get("blast_radius", {}).get("scope"),
+                    result.metadata.get("blast_radius", {}).get("lines_changed", 0),
+                )
             return True
         else:
             log.warning("Evolution failed: %s", result.reason)
