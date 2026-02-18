@@ -6,9 +6,10 @@ Pure stdlib — no external dependencies.
 
 from __future__ import annotations
 
-import pathlib
 import sqlite3
 import time
+
+from ring0.sqlite_store import SQLiteStore
 
 _CREATE_TABLE = """\
 CREATE TABLE IF NOT EXISTS tasks (
@@ -24,18 +25,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 """
 
 
-class TaskStore:
+class TaskStore(SQLiteStore):
     """Store and retrieve tasks in a local SQLite database."""
 
-    def __init__(self, db_path: pathlib.Path) -> None:
-        self.db_path = db_path
-        with self._connect() as con:
-            con.execute(_CREATE_TABLE)
-
-    def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(str(self.db_path))
-        con.row_factory = sqlite3.Row
-        return con
+    _TABLE_NAME = "tasks"
+    _CREATE_TABLE = _CREATE_TABLE
 
     def add(
         self,
@@ -110,13 +104,3 @@ class TaskStore:
             ).fetchone()
             return row["cnt"]
 
-    def count(self) -> int:
-        """Return total number of tasks."""
-        with self._connect() as con:
-            row = con.execute("SELECT COUNT(*) AS cnt FROM tasks").fetchone()
-            return row["cnt"]
-
-    def clear(self) -> None:
-        """Delete all tasks."""
-        with self._connect() as con:
-            con.execute("DELETE FROM tasks")

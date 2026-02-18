@@ -7,8 +7,9 @@ Pure stdlib — no external dependencies.
 from __future__ import annotations
 
 import json
-import pathlib
 import sqlite3
+
+from ring0.sqlite_store import SQLiteStore
 
 _CREATE_TABLE = """\
 CREATE TABLE IF NOT EXISTS skills (
@@ -27,17 +28,13 @@ CREATE TABLE IF NOT EXISTS skills (
 """
 
 
-class SkillStore:
+class SkillStore(SQLiteStore):
     """Store and retrieve skills in a local SQLite database."""
 
-    def __init__(self, db_path: pathlib.Path) -> None:
-        self.db_path = db_path
-        with self._connect() as con:
-            con.execute(_CREATE_TABLE)
-            self._migrate(con)
+    _TABLE_NAME = "skills"
+    _CREATE_TABLE = _CREATE_TABLE
 
-    @staticmethod
-    def _migrate(con: sqlite3.Connection) -> None:
+    def _migrate(self, con: sqlite3.Connection) -> None:
         """Add columns introduced after the initial schema."""
         cols = {row[1] for row in con.execute("PRAGMA table_info(skills)")}
         if "source_code" not in cols:
@@ -46,11 +43,6 @@ class SkillStore:
             con.execute("ALTER TABLE skills ADD COLUMN last_used_at TEXT DEFAULT NULL")
         if "published" not in cols:
             con.execute("ALTER TABLE skills ADD COLUMN published BOOLEAN DEFAULT 0")
-
-    def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(str(self.db_path))
-        con.row_factory = sqlite3.Row
-        return con
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -121,12 +113,6 @@ class SkillStore:
             con.execute(
                 "UPDATE skills SET active = 0 WHERE name = ?", (name,),
             )
-
-    def count(self) -> int:
-        """Return total number of skills."""
-        with self._connect() as con:
-            row = con.execute("SELECT COUNT(*) AS cnt FROM skills").fetchone()
-            return row["cnt"]
 
     def count_active(self) -> int:
         """Return number of active skills."""
@@ -271,7 +257,3 @@ class SkillStore:
             )
             return count + cur2.rowcount
 
-    def clear(self) -> None:
-        """Delete all skills."""
-        with self._connect() as con:
-            con.execute("DELETE FROM skills")

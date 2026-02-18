@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import math
-import pathlib
 import re
 import sqlite3
+
+from ring0.sqlite_store import SQLiteStore
 
 _CREATE_TABLE = """\
 CREATE TABLE IF NOT EXISTS memory (
@@ -141,19 +142,11 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-class MemoryStore:
+class MemoryStore(SQLiteStore):
     """Store and retrieve experiential memories in a local SQLite database."""
 
-    def __init__(self, db_path: pathlib.Path) -> None:
-        self.db_path = db_path
-        with self._connect() as con:
-            con.execute(_CREATE_TABLE)
-            self._migrate(con)
-
-    def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(str(self.db_path))
-        con.row_factory = sqlite3.Row
-        return con
+    _TABLE_NAME = "memory"
+    _CREATE_TABLE = _CREATE_TABLE
 
     def _migrate(self, con: sqlite3.Connection) -> None:
         """Add new columns if they don't exist (idempotent)."""
@@ -572,13 +565,3 @@ class MemoryStore:
             )
             return cur.rowcount
 
-    def count(self) -> int:
-        """Return total number of memory entries."""
-        with self._connect() as con:
-            row = con.execute("SELECT COUNT(*) AS cnt FROM memory").fetchone()
-            return row["cnt"]
-
-    def clear(self) -> None:
-        """Delete all memory entries."""
-        with self._connect() as con:
-            con.execute("DELETE FROM memory")

@@ -112,8 +112,7 @@ class TestSendMessage:
         assert mock_api.call_count == 1
 
     def test_http_429_retries(self, mock_api, monkeypatch):
-        import ring1.llm_client as mod
-        monkeypatch.setattr(mod, "_BASE_DELAY", 0.01)
+        monkeypatch.setattr(ClaudeClient, "_BASE_DELAY", 0.01)
 
         mock_api.status_code = 429
         client = ClaudeClient(api_key="sk-test")
@@ -123,8 +122,7 @@ class TestSendMessage:
         assert mock_api.call_count == 3
 
     def test_http_500_retries(self, mock_api, monkeypatch):
-        import ring1.llm_client as mod
-        monkeypatch.setattr(mod, "_BASE_DELAY", 0.01)
+        monkeypatch.setattr(ClaudeClient, "_BASE_DELAY", 0.01)
 
         mock_api.status_code = 500
         client = ClaudeClient(api_key="sk-test")
@@ -134,8 +132,7 @@ class TestSendMessage:
 
     def test_timeout_raises_llm_error(self, monkeypatch):
         """Socket TimeoutError should be caught and wrapped as LLMError."""
-        import ring1.llm_client as mod
-        monkeypatch.setattr(mod, "_BASE_DELAY", 0.01)
+        monkeypatch.setattr(ClaudeClient, "_BASE_DELAY", 0.01)
 
         # Patch urlopen to raise TimeoutError (simulating socket timeout)
         def fake_urlopen(*args, **kwargs):

@@ -123,6 +123,15 @@ def _classify_failure(proc, output: str) -> str:
     return "clean exit but heartbeat lost"
 
 
+def _best_effort(label, factory):
+    """Run *factory*; return its result or None on any error."""
+    try:
+        return factory()
+    except Exception as exc:
+        log.debug("%s not available: %s", label, exc)
+        return None
+
+
 def _should_evolve(state, cooldown_sec: int, fitness=None, plateau_window: int = 5, plateau_epsilon: float = 0.03, has_directive: bool = False) -> tuple[bool, bool]:
     """Check whether evolution should proceed.
 
@@ -354,88 +363,32 @@ def _try_crystallize(project_root, skill_store, source_code, output, generation,
         return None
 
 
-def _create_memory_store(db_path):
-    """Best-effort MemoryStore creation.  Returns None on any error."""
-    try:
-        return MemoryStore(db_path)
-    except Exception as exc:
-        log.debug("MemoryStore not available: %s", exc)
-        return None
-
-
-def _create_skill_store(db_path):
-    """Best-effort SkillStore creation.  Returns None on any error."""
-    try:
-        from ring0.skill_store import SkillStore
-        return SkillStore(db_path)
-    except Exception as exc:
-        log.debug("SkillStore not available: %s", exc)
-        return None
-
-
-def _create_gene_pool(db_path):
-    """Best-effort GenePool creation.  Returns None on any error."""
-    try:
-        from ring0.gene_pool import GenePool
-        return GenePool(db_path)
-    except Exception as exc:
-        log.debug("GenePool not available: %s", exc)
-        return None
-
-
-def _create_task_store(db_path):
-    """Best-effort TaskStore creation.  Returns None on any error."""
-    try:
-        from ring0.task_store import TaskStore
-        return TaskStore(db_path)
-    except Exception as exc:
-        log.debug("TaskStore not available: %s", exc)
-        return None
-
-
-def _create_skill_runner():
-    """Best-effort SkillRunner creation.  Returns None on any error."""
-    try:
-        from ring1.skill_runner import SkillRunner
-        return SkillRunner()
-    except Exception as exc:
-        log.debug("SkillRunner not available: %s", exc)
-        return None
-
-
 def _create_notifier(project_root):
-    """Best-effort Telegram notifier creation.  Returns None on any error."""
-    try:
+    """Best-effort Telegram notifier creation."""
+    def _factory():
         from ring1.config import load_ring1_config
         from ring1.telegram import create_notifier
-
-        r1_config = load_ring1_config(project_root)
-        return create_notifier(r1_config)
-    except Exception as exc:
-        log.debug("Telegram notifier not available: %s", exc)
-        return None
+        return create_notifier(load_ring1_config(project_root))
+    return _best_effort("Telegram notifier", _factory)
 
 
 def _create_bot(project_root, state, fitness, ring2_path):
-    """Best-effort Telegram bot creation.  Returns None on any error."""
-    try:
+    """Best-effort Telegram bot creation."""
+    def _factory():
         from ring1.config import load_ring1_config
         from ring1.telegram_bot import create_bot, start_bot_thread
-
         r1_config = load_ring1_config(project_root)
         bot = create_bot(r1_config, state, fitness, ring2_path)
         if bot:
             start_bot_thread(bot)
             log.info("Telegram bot started")
         return bot
-    except Exception as exc:
-        log.debug("Telegram bot not available: %s", exc)
-        return None
+    return _best_effort("Telegram bot", _factory)
 
 
 def _create_registry_client(project_root, cfg):
-    """Best-effort RegistryClient creation.  Returns None on any error."""
-    try:
+    """Best-effort RegistryClient creation."""
+    def _factory():
         from ring1.registry_client import RegistryClient
         reg_cfg = cfg.get("registry", {})
         if not reg_cfg.get("enabled", False):
@@ -448,16 +401,14 @@ def _create_registry_client(project_root, cfg):
         client = RegistryClient(url, node_id)
         log.info("RegistryClient created (url=%s, node_id=%s)", url, node_id)
         return client
-    except Exception as exc:
-        log.debug("RegistryClient not available: %s", exc)
-        return None
+    return _best_effort("RegistryClient", _factory)
 
 
 def _create_skill_syncer(skill_store, registry_client, user_profiler, cfg):
-    """Best-effort SkillSyncer creation.  Returns None on any error."""
+    """Best-effort SkillSyncer creation."""
     if not skill_store or not registry_client:
         return None
-    try:
+    def _factory():
         from ring1.skill_sync import SkillSyncer
         sync_cfg = cfg.get("ring1", {}).get("skill_sync", {})
         if not sync_cfg.get("enabled", True):
@@ -471,88 +422,63 @@ def _create_skill_syncer(skill_store, registry_client, user_profiler, cfg):
         )
         log.info("SkillSyncer created (max_discover=%d)", max_discover)
         return syncer
-    except Exception as exc:
-        log.debug("SkillSyncer not available: %s", exc)
-        return None
+    return _best_effort("SkillSyncer", _factory)
 
 
 def _create_portal(project_root, cfg, skill_store, skill_runner):
-    """Best-effort Skill Portal creation.  Returns None on any error."""
-    try:
+    """Best-effort Skill Portal creation."""
+    def _factory():
         from ring1.skill_portal import create_portal, start_portal_thread
-
         portal = create_portal(skill_store, skill_runner, project_root, cfg)
         if portal:
             start_portal_thread(portal)
             log.info("Skill Portal started")
         return portal
-    except Exception as exc:
-        log.debug("Skill Portal not available: %s", exc)
-        return None
-
-
-def _create_user_profiler(db_path):
-    """Best-effort UserProfiler creation.  Returns None on any error."""
-    try:
-        from ring0.user_profile import UserProfiler
-        return UserProfiler(db_path)
-    except Exception as exc:
-        log.debug("UserProfiler not available: %s", exc)
-        return None
+    return _best_effort("Skill Portal", _factory)
 
 
 def _create_embedding_provider(cfg):
-    """Best-effort EmbeddingProvider creation.  Returns None on any error."""
-    try:
+    """Best-effort EmbeddingProvider creation."""
+    def _factory():
         from ring1.embeddings import create_embedding_provider
         provider = create_embedding_provider(cfg)
-        # Return None if it's a NoOp (saves passing it around)
         from ring1.embeddings import NoOpEmbedding
         if isinstance(provider, NoOpEmbedding):
             return None
         return provider
-    except Exception as exc:
-        log.debug("EmbeddingProvider not available: %s", exc)
-        return None
+    return _best_effort("EmbeddingProvider", _factory)
 
 
 def _create_memory_curator(project_root):
-    """Best-effort MemoryCurator creation.  Returns None on any error."""
-    try:
+    """Best-effort MemoryCurator creation."""
+    def _factory():
         from ring1.config import load_ring1_config
         from ring1.memory_curator import MemoryCurator
-
         r1_config = load_ring1_config(project_root)
         if not r1_config.has_llm_config():
             return None
         client = r1_config.get_llm_client()
         return MemoryCurator(client)
-    except Exception as exc:
-        log.debug("MemoryCurator not available: %s", exc)
-        return None
+    return _best_effort("MemoryCurator", _factory)
 
 
 def _create_dashboard(project_root, cfg, **data_sources):
-    """Best-effort Dashboard creation.  Returns None on any error."""
-    try:
+    """Best-effort Dashboard creation."""
+    def _factory():
         from ring1.dashboard import create_dashboard, start_dashboard_thread
-
         dashboard = create_dashboard(project_root, cfg, **data_sources)
         if dashboard:
             start_dashboard_thread(dashboard)
             log.info("Dashboard started")
         return dashboard
-    except Exception as exc:
-        log.debug("Dashboard not available: %s", exc)
-        return None
+    return _best_effort("Dashboard", _factory)
 
 
 def _create_executor(project_root, state, ring2_path, reply_fn, memory_store=None, skill_store=None, skill_runner=None, task_store=None, registry_client=None, user_profiler=None, embedding_provider=None):
-    """Best-effort task executor creation.  Returns None on any error."""
-    try:
+    """Best-effort task executor creation."""
+    def _factory():
         from ring1.config import load_ring1_config
         from ring1.task_executor import create_executor, start_executor_thread
-
         r1_config = load_ring1_config(project_root)
         executor = create_executor(r1_config, state, ring2_path, reply_fn, memory_store=memory_store, skill_store=skill_store, skill_runner=skill_runner, task_store=task_store, registry_client=registry_client, user_profiler=user_profiler, embedding_provider=embedding_provider)
         if executor:
@@ -560,9 +486,7 @@ def _create_executor(project_root, state, ring2_path, reply_fn, memory_store=Non
             state.executor_thread = thread
             log.info("Task executor started")
         return executor
-    except Exception as exc:
-        log.debug("Task executor not available: %s", exc)
-        return None
+    return _best_effort("Task executor", _factory)
 
 
 def run(project_root: pathlib.Path) -> None:
@@ -593,11 +517,11 @@ def run(project_root: pathlib.Path) -> None:
     git = GitManager(ring2_path)
     git.init_repo()
     fitness = FitnessTracker(db_path)
-    memory_store = _create_memory_store(db_path)
-    skill_store = _create_skill_store(db_path)
-    gene_pool = _create_gene_pool(db_path)
-    task_store = _create_task_store(db_path)
-    user_profiler = _create_user_profiler(db_path)
+    memory_store = _best_effort("MemoryStore", lambda: MemoryStore(db_path))
+    skill_store = _best_effort("SkillStore", lambda: __import__("ring0.skill_store", fromlist=["SkillStore"]).SkillStore(db_path))
+    gene_pool = _best_effort("GenePool", lambda: __import__("ring0.gene_pool", fromlist=["GenePool"]).GenePool(db_path))
+    task_store = _best_effort("TaskStore", lambda: __import__("ring0.task_store", fromlist=["TaskStore"]).TaskStore(db_path))
+    user_profiler = _best_effort("UserProfiler", lambda: __import__("ring0.user_profile", fromlist=["UserProfiler"]).UserProfiler(db_path))
     embedding_provider = _create_embedding_provider(cfg)
     memory_curator = _create_memory_curator(project_root)
 
@@ -626,7 +550,7 @@ def run(project_root: pathlib.Path) -> None:
     from ring1.telegram_bot import SentinelState
     state = SentinelState()
     state.notifier = notifier  # bot uses this for auto-detect propagation
-    skill_runner = _create_skill_runner()
+    skill_runner = _best_effort("SkillRunner", lambda: __import__("ring1.skill_runner", fromlist=["SkillRunner"]).SkillRunner())
     state.memory_store = memory_store
     state.skill_store = skill_store
     state.skill_runner = skill_runner

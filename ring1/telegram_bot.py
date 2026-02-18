@@ -32,10 +32,30 @@ class SentinelState:
     Bot reads fields under the lock on command.
     """
 
+    __slots__ = (
+        # Synchronisation primitives
+        "lock", "pause_event", "kill_event", "p0_event", "restart_event",
+        "p0_active", "p1_active",
+        # Generation state
+        "generation", "start_time", "alive", "mutation_rate",
+        "max_runtime_sec", "last_score", "last_survived",
+        # Task / scheduling
+        "task_queue", "evolution_directive", "last_evolution_time",
+        "last_task_completion", "executor_thread",
+        # Store references
+        "memory_store", "skill_store", "task_store",
+        # Service references
+        "notifier", "skill_runner", "registry_client", "subagent_manager",
+    )
+
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.pause_event = threading.Event()
         self.kill_event = threading.Event()
+        self.p0_event = threading.Event()
+        self.restart_event = threading.Event()
+        self.p0_active = threading.Event()
+        self.p1_active = threading.Event()
         # Mutable fields — protected by self.lock
         self.generation: int = 0
         self.start_time: float = time.time()
@@ -44,22 +64,21 @@ class SentinelState:
         self.max_runtime_sec: float = 0.0
         self.last_score: float = 0.0
         self.last_survived: bool = False
-        # Task / scheduling fields (Phase 3.5)
+        # Task / scheduling
         self.task_queue: queue.Queue = queue.Queue()
-        self.p0_active = threading.Event()    # P0 task executing
-        self.p0_event = threading.Event()     # pulse to wake sentinel
-        self.evolution_directive: str = ""    # user directive (lock-protected)
-        self.memory_store = None              # set by Sentinel after creation
-        # Phase 5 fields
-        self.p1_active = threading.Event()    # P1 autonomous task executing
-        self.last_evolution_time: float = 0.0 # last successful evolution timestamp
-        self.skill_store = None               # set by Sentinel after creation
-        self.skill_runner = None              # set by Sentinel after creation
-        self.restart_event = threading.Event() # commit watcher triggers restart
-        # Phase 6: task persistence + executor health
-        self.task_store = None                # set by Sentinel after creation
+        self.evolution_directive: str = ""
+        self.last_evolution_time: float = 0.0
         self.last_task_completion: float = 0.0
         self.executor_thread: threading.Thread | None = None
+        # Store references (set by Sentinel after creation)
+        self.memory_store = None
+        self.skill_store = None
+        self.task_store = None
+        # Service references (set by Sentinel after creation)
+        self.notifier = None
+        self.skill_runner = None
+        self.registry_client = None
+        self.subagent_manager = None
 
     def snapshot(self) -> dict:
         """Return a consistent copy of all fields."""

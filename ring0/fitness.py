@@ -7,9 +7,10 @@ self-evolving lifecycle.  Pure stdlib — no external dependencies.
 from __future__ import annotations
 
 import json
-import pathlib
 import re
 import sqlite3
+
+from ring0.sqlite_store import SQLiteStore
 
 _CREATE_TABLE = """\
 CREATE TABLE IF NOT EXISTS fitness_log (
@@ -187,27 +188,17 @@ def evaluate_output(
     return round(score, 4), detail
 
 
-class FitnessTracker:
+class FitnessTracker(SQLiteStore):
     """Evaluate and record fitness scores in a local SQLite database."""
 
-    def __init__(self, db_path: pathlib.Path) -> None:
-        self.db_path = db_path
-        with self._connect() as con:
-            con.execute(_CREATE_TABLE)
-            # Migrate: add detail column if missing.
-            try:
-                con.execute("ALTER TABLE fitness_log ADD COLUMN detail TEXT")
-            except sqlite3.OperationalError:
-                pass  # column already exists
+    _TABLE_NAME = "fitness_log"
+    _CREATE_TABLE = _CREATE_TABLE
 
-    def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(str(self.db_path))
-        con.row_factory = sqlite3.Row
-        return con
-
-    @staticmethod
-    def _row_to_dict(row: sqlite3.Row) -> dict:
-        return dict(row)
+    def _migrate(self, con: sqlite3.Connection) -> None:
+        try:
+            con.execute("ALTER TABLE fitness_log ADD COLUMN detail TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     def record(
         self,

@@ -7,18 +7,11 @@ from __future__ import annotations
 
 import json
 import logging
-import time
-import urllib.error
-import urllib.request
 from typing import Callable
 
 from ring1.llm_base import LLMClient, LLMError
 
 log = logging.getLogger("protea.llm_openai")
-
-_RETRYABLE_CODES = {429, 500, 502, 503}
-_MAX_RETRIES = 3
-_BASE_DELAY = 2.0  # seconds
 
 
 def _convert_tool_schema(tool: dict) -> dict:
@@ -39,6 +32,8 @@ def _convert_tool_schema(tool: dict) -> dict:
 
 class OpenAIClient(LLMClient):
     """OpenAI-compatible chat completions client (no third-party deps)."""
+
+    _LOG_PREFIX = "OpenAI-compat API"
 
     def __init__(
         self,
@@ -65,56 +60,7 @@ class OpenAIClient(LLMClient):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
-
-        last_error: Exception | None = None
-        for attempt in range(_MAX_RETRIES):
-            try:
-                req = urllib.request.Request(
-                    self.api_url, data=data, headers=headers, method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
-            except urllib.error.HTTPError as exc:
-                last_error = exc
-                code = exc.code
-                if code in _RETRYABLE_CODES and attempt < _MAX_RETRIES - 1:
-                    delay = _BASE_DELAY * (2 ** attempt)
-                    log.warning(
-                        "OpenAI-compat API %d — retry %d/%d in %.1fs",
-                        code, attempt + 1, _MAX_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise LLMError(
-                    f"OpenAI-compat API HTTP {code}: "
-                    f"{exc.read().decode('utf-8', errors='replace')}"
-                ) from exc
-            except urllib.error.URLError as exc:
-                last_error = exc
-                if attempt < _MAX_RETRIES - 1:
-                    delay = _BASE_DELAY * (2 ** attempt)
-                    log.warning(
-                        "OpenAI-compat API network error — retry %d/%d in %.1fs",
-                        attempt + 1, _MAX_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise LLMError(f"OpenAI-compat API network error: {exc}") from exc
-            except (TimeoutError, OSError) as exc:
-                last_error = exc
-                if attempt < _MAX_RETRIES - 1:
-                    delay = _BASE_DELAY * (2 ** attempt)
-                    log.warning(
-                        "OpenAI-compat API timeout — retry %d/%d in %.1fs",
-                        attempt + 1, _MAX_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise LLMError(f"OpenAI-compat API timeout: {exc}") from exc
-
-        raise LLMError(
-            f"OpenAI-compat API failed after {_MAX_RETRIES} retries"
-        ) from last_error
+        return self._call_api_with_retry(self.api_url, data, headers)
 
     # ------------------------------------------------------------------
     # Public: simple message (no tools)

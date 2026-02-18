@@ -8,9 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
-import urllib.error
-import urllib.request
 from typing import Callable
 
 from ring1.llm_base import LLMClient, LLMError  # noqa: F401 — re-export LLMError
@@ -20,13 +17,12 @@ log = logging.getLogger("protea.llm_client")
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
 
-_RETRYABLE_CODES = {429, 500, 502, 503, 529}
-_MAX_RETRIES = 3
-_BASE_DELAY = 2.0  # seconds
-
 
 class ClaudeClient(LLMClient):
     """Minimal Claude Messages API client (no third-party deps)."""
+
+    _RETRYABLE_CODES = {429, 500, 502, 503, 529}
+    _LOG_PREFIX = "Claude API"
 
     def __init__(
         self,
@@ -45,63 +41,14 @@ class ClaudeClient(LLMClient):
     # ------------------------------------------------------------------
 
     def _call_api(self, payload: dict) -> dict:
-        """Send *payload* to the Claude Messages API and return the JSON body.
-
-        Retries on transient errors (429, 5xx) with exponential backoff.
-        """
+        """Send *payload* to the Claude Messages API and return the JSON body."""
         data = json.dumps(payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
             "x-api-key": self.api_key,
             "anthropic-version": API_VERSION,
         }
-
-        last_error: Exception | None = None
-        for attempt in range(_MAX_RETRIES):
-            try:
-                req = urllib.request.Request(
-                    API_URL, data=data, headers=headers, method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
-            except urllib.error.HTTPError as exc:
-                last_error = exc
-                code = exc.code
-                if code in _RETRYABLE_CODES and attempt < _MAX_RETRIES - 1:
-                    delay = _BASE_DELAY * (2 ** attempt)
-                    log.warning(
-                        "Claude API %d — retry %d/%d in %.1fs",
-                        code, attempt + 1, _MAX_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise LLMError(
-                    f"Claude API HTTP {code}: {exc.read().decode('utf-8', errors='replace')}"
-                ) from exc
-            except urllib.error.URLError as exc:
-                last_error = exc
-                if attempt < _MAX_RETRIES - 1:
-                    delay = _BASE_DELAY * (2 ** attempt)
-                    log.warning(
-                        "Claude API network error — retry %d/%d in %.1fs",
-                        attempt + 1, _MAX_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise LLMError(f"Claude API network error: {exc}") from exc
-            except (TimeoutError, OSError) as exc:
-                last_error = exc
-                if attempt < _MAX_RETRIES - 1:
-                    delay = _BASE_DELAY * (2 ** attempt)
-                    log.warning(
-                        "Claude API timeout — retry %d/%d in %.1fs",
-                        attempt + 1, _MAX_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise LLMError(f"Claude API timeout: {exc}") from exc
-
-        raise LLMError(f"Claude API failed after {_MAX_RETRIES} retries") from last_error
+        return self._call_api_with_retry(API_URL, data, headers)
 
     # ------------------------------------------------------------------
     # Public: simple message (no tools)

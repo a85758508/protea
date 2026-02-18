@@ -16,6 +16,8 @@ import re
 import sqlite3
 import subprocess
 
+from ring0.sqlite_store import SQLiteStore
+
 log = logging.getLogger("protea.gene_pool")
 
 _CREATE_TABLE = """\
@@ -43,25 +45,22 @@ _STOPWORDS = frozenset({
 })
 
 
-class GenePool:
+class GenePool(SQLiteStore):
     """Top-N gene storage for evolutionary inheritance."""
 
+    _TABLE_NAME = "gene_pool"
+    _CREATE_TABLE = _CREATE_TABLE
+
     def __init__(self, db_path: pathlib.Path, max_size: int = 100) -> None:
-        self.db_path = db_path
         self.max_size = max_size
-        with self._connect() as con:
-            con.execute(_CREATE_TABLE)
-            # Migrate: add tags column if missing.
-            try:
-                con.execute("ALTER TABLE gene_pool ADD COLUMN tags TEXT")
-            except sqlite3.OperationalError:
-                pass  # column already exists
+        super().__init__(db_path)
         self._backfill_tags()
 
-    def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(str(self.db_path))
-        con.row_factory = sqlite3.Row
-        return con
+    def _migrate(self, con: sqlite3.Connection) -> None:
+        try:
+            con.execute("ALTER TABLE gene_pool ADD COLUMN tags TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     def _backfill_tags(self) -> None:
         """Compute and store tags for existing genes that lack them."""
@@ -174,12 +173,6 @@ class GenePool:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [gene for _, gene in scored[:n]]
-
-    def count(self) -> int:
-        """Return total number of genes stored."""
-        with self._connect() as con:
-            row = con.execute("SELECT COUNT(*) AS cnt FROM gene_pool").fetchone()
-            return row["cnt"]
 
     def backfill(self, skill_store) -> int:
         """One-time backfill from existing crystallized skills.

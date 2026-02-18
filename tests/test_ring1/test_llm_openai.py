@@ -169,8 +169,7 @@ class TestSendMessage:
         assert handler.call_count == 1
 
     def test_http_429_retries(self, mock_api, monkeypatch):
-        import ring1.llm_openai as mod
-        monkeypatch.setattr(mod, "_BASE_DELAY", 0.01)
+        monkeypatch.setattr(OpenAIClient, "_BASE_DELAY", 0.01)
 
         handler, url = mock_api
         handler.status_code = 429
@@ -180,8 +179,7 @@ class TestSendMessage:
         assert handler.call_count == 3
 
     def test_http_500_retries(self, mock_api, monkeypatch):
-        import ring1.llm_openai as mod
-        monkeypatch.setattr(mod, "_BASE_DELAY", 0.01)
+        monkeypatch.setattr(OpenAIClient, "_BASE_DELAY", 0.01)
 
         handler, url = mock_api
         handler.status_code = 500
