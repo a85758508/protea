@@ -249,19 +249,20 @@ class MemoryStore(SQLiteStore):
             return cur.lastrowid  # type: ignore[return-value]
 
     def get_recent(self, limit: int = 10) -> list[dict]:
-        """Return the most recent entries ordered by *id* descending."""
+        """Return the most recent non-archived entries ordered by *id* descending."""
         with self._connect() as con:
             rows = con.execute(
-                "SELECT * FROM memory ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM memory WHERE tier != 'archive' "
+                "ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
             return [self._row_to_dict(r) for r in rows]
 
     def get_by_type(self, entry_type: str, limit: int = 10) -> list[dict]:
-        """Return entries of a specific type, most recent first."""
+        """Return non-archived entries of a specific type, most recent first."""
         with self._connect() as con:
             rows = con.execute(
-                "SELECT * FROM memory WHERE entry_type = ? "
+                "SELECT * FROM memory WHERE entry_type = ? AND tier != 'archive' "
                 "ORDER BY id DESC LIMIT ?",
                 (entry_type, limit),
             ).fetchall()
@@ -278,7 +279,7 @@ class MemoryStore(SQLiteStore):
             return [self._row_to_dict(r) for r in rows]
 
     def get_relevant(self, keywords: list[str], limit: int = 5) -> list[dict]:
-        """Keyword-based relevance search using SQL LIKE."""
+        """Keyword-based relevance search using SQL LIKE (excludes archive)."""
         if not keywords:
             return []
         # Build OR clause for each keyword.
@@ -291,7 +292,7 @@ class MemoryStore(SQLiteStore):
         params.append(str(limit))
         with self._connect() as con:
             rows = con.execute(
-                f"SELECT * FROM memory WHERE {where} "
+                f"SELECT * FROM memory WHERE tier != 'archive' AND ({where}) "
                 f"ORDER BY importance DESC, id DESC LIMIT ?",
                 params,
             ).fetchall()
@@ -374,6 +375,67 @@ class MemoryStore(SQLiteStore):
 
             if score > 0:
                 d["search_score"] = round(score, 4)
+                scored.append((score, d))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [d for _, d in scored[:limit]]
+
+    def recall(
+        self,
+        keywords: list[str],
+        query_embedding: list[float] | None = None,
+        limit: int = 2,
+    ) -> list[dict]:
+        """Search only the archive tier for related old memories.
+
+        Uses hybrid search logic (keyword + vector) restricted to archive.
+        Returns entries with ``recalled = True`` marker, or empty list.
+        """
+        if not keywords and query_embedding is None:
+            return []
+
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT * FROM memory WHERE tier = 'archive' ORDER BY id DESC",
+            ).fetchall()
+
+        if not rows:
+            return []
+
+        kw_set = {kw.lower() for kw in keywords} if keywords else set()
+
+        scored: list[tuple[float, dict]] = []
+        for row in rows:
+            d = self._row_to_dict(row)
+            entry_keywords = (row["keywords"] or "").lower().split()
+            entry_kw_set = set(entry_keywords)
+
+            # Keyword score.
+            kw_score = 0.0
+            if kw_set:
+                matches = len(kw_set & entry_kw_set)
+                kw_score = matches / len(kw_set)
+
+            # Vector score.
+            vec_score = 0.0
+            has_embedding = False
+            if query_embedding and row["embedding"]:
+                try:
+                    emb = json.loads(row["embedding"])
+                    vec_score = _cosine_similarity(query_embedding, emb)
+                    has_embedding = True
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Combined score (same weights as hybrid_search).
+            if has_embedding:
+                score = 0.4 * kw_score + 0.6 * vec_score
+            else:
+                score = kw_score
+
+            if score > 0:
+                d["search_score"] = round(score, 4)
+                d["recalled"] = True
                 scored.append((score, d))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -472,7 +534,7 @@ class MemoryStore(SQLiteStore):
                     demoted += 1
 
                 if merge:
-                    # Create a compacted summary entry.
+                    # Create a compacted summary entry with archived_ids.
                     ids = [r["id"] for r in merge]
                     gen_min = min(r["generation"] for r in merge)
                     gen_max = max(r["generation"] for r in merge)
@@ -481,16 +543,18 @@ class MemoryStore(SQLiteStore):
                         f"Compacted {len(merge)} {entry_type} entries "
                         f"from gen {gen_min}-{gen_max}: {first_content}..."
                     )
+                    meta = json.dumps({"archived_ids": ids})
                     con.execute(
                         "INSERT INTO memory "
                         "(generation, entry_type, content, metadata, importance, tier, keywords) "
-                        "VALUES (?, ?, ?, '{}', 0.3, 'warm', ?)",
-                        (current_generation, entry_type, summary, _extract_keywords(summary)),
+                        "VALUES (?, ?, ?, ?, 0.3, 'warm', ?)",
+                        (current_generation, entry_type, summary, meta, _extract_keywords(summary)),
                     )
-                    # Delete the merged originals.
+                    # Archive the merged originals instead of deleting.
                     placeholders = ",".join("?" * len(ids))
                     con.execute(
-                        f"DELETE FROM memory WHERE id IN ({placeholders})",
+                        f"UPDATE memory SET tier = 'archive' "
+                        f"WHERE id IN ({placeholders})",
                         ids,
                     )
                     demoted += len(merge)
@@ -555,12 +619,12 @@ class MemoryStore(SQLiteStore):
             return count
 
     def _cleanup_cold(self, current_generation: int) -> int:
-        """Delete old, low-importance cold entries (selective forgetting)."""
+        """Archive old, low-importance cold entries (demote to archive tier)."""
         threshold_gen = current_generation - 200
         with self._connect() as con:
             cur = con.execute(
-                "DELETE FROM memory WHERE tier = 'cold' "
-                "AND generation <= ? AND importance < 0.3",
+                "UPDATE memory SET tier = 'archive', importance = importance * 0.3 "
+                "WHERE tier = 'cold' AND generation <= ? AND importance < 0.3",
                 (threshold_gen,),
             )
             return cur.rowcount

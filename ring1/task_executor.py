@@ -26,6 +26,22 @@ log = logging.getLogger("protea.task_executor")
 
 _MAX_REPLY_LEN = 4000  # Telegram message limit safety margin
 
+_RECALL_KEYWORD_RE = __import__("re").compile(r"[a-zA-Z0-9_\u4e00-\u9fff]+")
+
+
+def _extract_recall_keywords(text: str) -> list[str]:
+    """Extract keywords from task text for archive recall."""
+    tokens = _RECALL_KEYWORD_RE.findall(text.lower())
+    seen: set[str] = set()
+    keywords: list[str] = []
+    for t in tokens:
+        if len(t) >= 3 and t not in seen:
+            seen.add(t)
+            keywords.append(t)
+            if len(keywords) >= 10:
+                break
+    return keywords
+
 TASK_SYSTEM_PROMPT = """\
 You are Protea, a self-evolving artificial life agent running on a host machine.
 You are helpful and concise.  Answer the user's question or perform the requested
@@ -135,6 +151,7 @@ def _build_task_context(
     memories: list[dict] | None = None,
     skills: list[dict] | None = None,
     chat_history: list[tuple[str, str]] | None = None,
+    recalled: list[dict] | None = None,
 ) -> str:
     """Build context string from current Protea state for LLM task calls."""
     parts = ["## Protea State"]
@@ -180,6 +197,14 @@ def _build_task_context(
             parts.append(f"User: {u}")
             parts.append(f"Assistant: {a}")
             parts.append("")
+
+    if recalled:
+        parts.append("")
+        parts.append("## Recalled Memories")
+        for mem in recalled:
+            gen = mem.get("generation", "?")
+            content = mem.get("content", "")[:200]
+            parts.append(f"- [Gen {gen}, archived] {content}")
 
     return "\n".join(parts)
 
@@ -335,6 +360,21 @@ class TaskExecutor:
                 except Exception:
                     pass
 
+            recalled: list[dict] = []
+            if self.memory_store:
+                try:
+                    keywords = _extract_recall_keywords(task.text)
+                    emb = None
+                    if self.embedding_provider:
+                        try:
+                            vecs = self.embedding_provider.embed([task.text])
+                            emb = vecs[0] if vecs else None
+                        except Exception:
+                            pass
+                    recalled = self.memory_store.recall(keywords, emb, limit=2)
+                except Exception:
+                    pass
+
             skills = []
             if self.skill_store:
                 try:
@@ -343,7 +383,7 @@ class TaskExecutor:
                     pass
 
             history = self._get_recent_history()
-            context = _build_task_context(snap, ring2_source, memories=memories, skills=skills, chat_history=history)
+            context = _build_task_context(snap, ring2_source, memories=memories, skills=skills, chat_history=history, recalled=recalled)
             user_message = f"{context}\n\n## User Request\n{task.text}"
 
             # LLM call with tool registry
@@ -521,6 +561,21 @@ class TaskExecutor:
                 except Exception:
                     pass
 
+            recalled: list[dict] = []
+            if self.memory_store:
+                try:
+                    keywords = _extract_recall_keywords(task_desc)
+                    emb = None
+                    if self.embedding_provider:
+                        try:
+                            vecs = self.embedding_provider.embed([task_desc])
+                            emb = vecs[0] if vecs else None
+                        except Exception:
+                            pass
+                    recalled = self.memory_store.recall(keywords, emb, limit=2)
+                except Exception:
+                    pass
+
             skills = []
             if self.skill_store:
                 try:
@@ -528,7 +583,7 @@ class TaskExecutor:
                 except Exception:
                     pass
 
-            context = _build_task_context(snap, ring2_source, memories=memories, skills=skills)
+            context = _build_task_context(snap, ring2_source, memories=memories, skills=skills, recalled=recalled)
             user_message = f"{context}\n\n## Autonomous Task\n{task_desc}"
 
             try:

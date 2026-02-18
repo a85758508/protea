@@ -455,20 +455,26 @@ class TestCompact:
         hot = store.get_by_tier("hot")
         assert len(hot) == 1
 
-    def test_cold_cleanup(self, tmp_path):
+    def test_cold_cleanup_archives(self, tmp_path):
         store = MemoryStore(tmp_path / "mem.db")
         # Manually insert a cold entry with low importance
         import sqlite3
         con = sqlite3.connect(str(tmp_path / "mem.db"))
         con.execute(
             "INSERT INTO memory (generation, entry_type, content, metadata, importance, tier, keywords) "
-            "VALUES (1, 'observation', 'ancient', '{}', 0.1, 'cold', '')",
+            "VALUES (1, 'observation', 'ancient', '{}', 0.1, 'cold', 'ancient')",
         )
         con.commit()
         con.close()
 
         result = store.compact(current_generation=400)
         assert result["deleted"] == 1
+        # Entry is archived, not deleted.
+        archived = store.get_by_tier("archive")
+        assert len(archived) == 1
+        assert archived[0]["content"] == "ancient"
+        # Importance decayed by 0.3x.
+        assert abs(archived[0]["importance"] - 0.03) < 1e-6
 
     def test_compact_returns_correct_keys(self, tmp_path):
         store = MemoryStore(tmp_path / "mem.db")
@@ -554,3 +560,143 @@ class TestMigration:
         # Re-open should not fail.
         store2 = MemoryStore(db)
         assert store2.count() == 1
+
+
+class TestArchiveTier:
+    """Archive tier: memories are preserved, not deleted."""
+
+    def test_compact_hot_to_warm_archives_originals(self, tmp_path):
+        """Merged originals go to archive tier with archived_ids in summary."""
+        store = MemoryStore(tmp_path / "mem.db")
+        # Add 5 old low-importance entries of same type → 3 kept, 2 merged+archived
+        ids = []
+        for i in range(5):
+            rid = store.add(1, "observation", f"old obs {i}", importance=0.5)
+            ids.append(rid)
+
+        result = store.compact(current_generation=50)
+        assert result["hot_to_warm"] == 5
+
+        # The 2 merged originals should be in archive tier.
+        archived = store.get_by_tier("archive")
+        assert len(archived) == 2
+        archived_ids = {e["id"] for e in archived}
+        # They should be the last 2 entries (ids[3], ids[4]).
+        assert ids[3] in archived_ids
+        assert ids[4] in archived_ids
+
+        # The compacted summary should contain archived_ids metadata.
+        warm = store.get_by_tier("warm")
+        summaries = [e for e in warm if "Compacted" in e["content"]]
+        assert len(summaries) == 1
+        assert set(summaries[0]["metadata"]["archived_ids"]) == {ids[3], ids[4]}
+
+    def test_get_recent_excludes_archive(self, tmp_path):
+        import sqlite3
+        store = MemoryStore(tmp_path / "mem.db")
+        store.add(1, "observation", "active entry")
+        # Manually insert an archived entry.
+        con = sqlite3.connect(str(tmp_path / "mem.db"))
+        con.execute(
+            "INSERT INTO memory (generation, entry_type, content, metadata, importance, tier, keywords) "
+            "VALUES (1, 'observation', 'archived entry', '{}', 0.1, 'archive', 'archived')",
+        )
+        con.commit()
+        con.close()
+
+        recent = store.get_recent(10)
+        assert len(recent) == 1
+        assert recent[0]["content"] == "active entry"
+
+    def test_get_by_type_excludes_archive(self, tmp_path):
+        import sqlite3
+        store = MemoryStore(tmp_path / "mem.db")
+        store.add(1, "task", "active task")
+        con = sqlite3.connect(str(tmp_path / "mem.db"))
+        con.execute(
+            "INSERT INTO memory (generation, entry_type, content, metadata, importance, tier, keywords) "
+            "VALUES (1, 'task', 'archived task', '{}', 0.1, 'archive', 'archived')",
+        )
+        con.commit()
+        con.close()
+
+        tasks = store.get_by_type("task")
+        assert len(tasks) == 1
+        assert tasks[0]["content"] == "active task"
+
+    def test_get_relevant_excludes_archive(self, tmp_path):
+        import sqlite3
+        store = MemoryStore(tmp_path / "mem.db")
+        store.add(1, "task", "python code analysis")
+        con = sqlite3.connect(str(tmp_path / "mem.db"))
+        con.execute(
+            "INSERT INTO memory (generation, entry_type, content, metadata, importance, tier, keywords) "
+            "VALUES (1, 'task', 'python old stuff', '{}', 0.1, 'archive', 'python old stuff')",
+        )
+        con.commit()
+        con.close()
+
+        results = store.get_relevant(["python"])
+        assert len(results) == 1
+        assert results[0]["content"] == "python code analysis"
+
+    def test_recall_keyword_match(self, tmp_path):
+        import sqlite3
+        store = MemoryStore(tmp_path / "mem.db")
+        # Add an archived entry with keywords.
+        con = sqlite3.connect(str(tmp_path / "mem.db"))
+        con.execute(
+            "INSERT INTO memory (generation, entry_type, content, metadata, importance, tier, keywords, embedding) "
+            "VALUES (42, 'task', 'websocket realtime push research', '{}', 0.05, 'archive', 'websocket realtime push research', '')",
+        )
+        con.commit()
+        con.close()
+
+        results = store.recall(["websocket", "realtime"])
+        assert len(results) == 1
+        assert results[0]["recalled"] is True
+        assert results[0]["generation"] == 42
+        assert "websocket" in results[0]["content"]
+
+    def test_recall_no_match(self, tmp_path):
+        import sqlite3
+        store = MemoryStore(tmp_path / "mem.db")
+        # Add an archived entry.
+        con = sqlite3.connect(str(tmp_path / "mem.db"))
+        con.execute(
+            "INSERT INTO memory (generation, entry_type, content, metadata, importance, tier, keywords, embedding) "
+            "VALUES (1, 'task', 'stock market data', '{}', 0.05, 'archive', 'stock market data', '')",
+        )
+        con.commit()
+        con.close()
+
+        results = store.recall(["quantum", "computing"])
+        assert results == []
+
+    def test_recall_ignores_non_archive(self, tmp_path):
+        """recall() should only search archive tier."""
+        store = MemoryStore(tmp_path / "mem.db")
+        store.add(1, "task", "websocket hot entry")
+        results = store.recall(["websocket"])
+        assert results == []
+
+    def test_recall_empty_keywords(self, tmp_path):
+        store = MemoryStore(tmp_path / "mem.db")
+        assert store.recall([]) == []
+
+    def test_get_stats_includes_archive(self, tmp_path):
+        import sqlite3
+        store = MemoryStore(tmp_path / "mem.db")
+        store.add(1, "observation", "hot entry")
+        con = sqlite3.connect(str(tmp_path / "mem.db"))
+        con.execute(
+            "INSERT INTO memory (generation, entry_type, content, metadata, importance, tier, keywords) "
+            "VALUES (1, 'observation', 'old entry', '{}', 0.05, 'archive', '')",
+        )
+        con.commit()
+        con.close()
+
+        stats = store.get_stats()
+        assert stats["total"] == 2
+        assert stats["by_tier"].get("archive") == 1
+        assert stats["by_tier"].get("hot") == 1
